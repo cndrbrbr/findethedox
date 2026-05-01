@@ -105,11 +105,11 @@ class CloudWidget(QWidget):
 
         # Render each word as a matplotlib text object so we can hit-test clicks
         ax = self._ax
-        ax.set_xlim(0, wc.width_)
-        ax.set_ylim(0, wc.height_)
+        ax.set_xlim(0, wc.width)
+        ax.set_ylim(0, wc.height)
 
         for (word, _), font_size, (row, col), orient, colour in wc.layout_:
-            x, y = col, wc.height_ - row
+            x, y = col, wc.height - row
             rot = 90 if orient else 0
             txt = ax.text(
                 x, y, word,
@@ -118,7 +118,6 @@ class CloudWidget(QWidget):
                 rotation=rot,
                 va="top" if not rot else "center",
                 ha="left" if not rot else "center",
-                cursor=plt.matplotlib.backend_bases.Cursors.POINTER,
             )
             # Store bounding box in data coordinates after draw
             self._word_boxes.append((word, x, y, font_size, rot))
