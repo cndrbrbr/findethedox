@@ -1,0 +1,4 @@
+PyQt6>=6.6.0
+wordcloud>=1.9.0
+pymupdf>=1.23.0
+matplotlib>=3.8.0
