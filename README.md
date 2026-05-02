@@ -95,11 +95,17 @@ Left-clicking any word in any cloud makes that word the new search term.
 The clouds immediately re-centre around the clicked word. This lets you
 navigate through the vocabulary by following associations.
 
-### Right-click — find documents
+### Document panel — automatic updates
 
-Right-clicking a word opens the **document panel** on the right side of
-the window. It lists every document and page where the word occurs, one
-entry per page. The format is:
+The **document panel** on the right side of the window updates automatically
+whenever the active word changes:
+
+- **Enter** after typing a word → panel shows documents for that word
+- **Left-click** on a word → clouds re-centre and panel updates for the new word
+- **Right-click** on a word → panel updates for that word without changing the clouds
+
+The panel lists every document and page where the word occurs, one entry per
+page. The format is:
 
 ```
 filename.pdf  (p.12)
