@@ -50,6 +50,8 @@ and only happens once — subsequent launches are instant.
 
 ## Interface overview
 
+![findethedox screenshot](Screenshot%202026-05-02%20001052.png)
+
 ```
 ┌─────────────────────────────────────────────────────────┬──────────────┐
 │  Search: [ type a word and press Enter ______________ ] │              │
