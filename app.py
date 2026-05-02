@@ -222,12 +222,17 @@ class MainWindow(QMainWindow):
             self._load_global()
         else:
             self._load_cooccurrences(word)
+            self._show_documents(word)
 
     def _on_left_click(self, word: str):
         self._search.setText(word)
         self._load_cooccurrences(word)
+        self._show_documents(word)
 
     def _on_right_click(self, word: str):
+        self._show_documents(word)
+
+    def _show_documents(self, word: str):
         self._current_word = word
         occs = query.document_occurrences(self._conn, word)
         self._doc_list.clear()
@@ -243,9 +248,6 @@ class MainWindow(QMainWindow):
 
         self._doc_title.setText(f'"{word}" in {self._doc_list.count()} document(s)')
         self._right_panel.setVisible(True)
-        self._status.showMessage(
-            f'Right-clicked "{word}" — {len(occs)} occurrence(s)', 4000
-        )
 
     def _on_doc_clicked(self, item: QListWidgetItem):
         occ: query.DocOccurrence = item.data(Qt.ItemDataRole.UserRole)
