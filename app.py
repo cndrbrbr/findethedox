@@ -246,6 +246,7 @@ class MainWindow(QMainWindow):
         if self._cache_conn is None:
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
         try:
             self._status.showMessage("Loading…")
             rows = cache_mod.global_frequencies(self._cache_conn)
@@ -262,6 +263,7 @@ class MainWindow(QMainWindow):
             self._status.showMessage("Cache not ready yet.", 3000)
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
         try:
             self._status.showMessage(f'Searching for "{word}"…')
             rows = cache_mod.cooccurrences(self._cache_conn, word)
@@ -280,6 +282,7 @@ class MainWindow(QMainWindow):
     def _show_documents(self, word: str):
         self._current_word = word
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
         try:
             occs = query.document_occurrences(self._conn, word)
             self._doc_list.clear()
