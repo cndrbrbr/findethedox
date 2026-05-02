@@ -111,7 +111,61 @@ slow on large databases.
 | `app.py` | `QMainWindow`: search bar, 3-cloud layout, document panel, dark theme, background index worker |
 | `cloud_widget.py` | Per-kind interactive word cloud widget (wordcloud layout + matplotlib hit-testing) |
 | `query.py` | All database queries: global frequencies, co-occurrence JOINs, document occurrences, index creation |
+| `cache.py` | Pre-computed score cache: builds `allmydox.cache.db` once, then serves all searches in < 5 ms |
 | `doc_viewer.py` | Built-in document viewer: PDF (pymupdf + word highlight) and DOCX/TXT (plain text) |
 | `requirements.txt` | PyQt6, wordcloud, pymupdf, matplotlib |
 | `setup.sh` | Linux setup: installs pip if needed, installs dependencies, verifies installation |
 | `setup.bat` | Windows setup: installs dependencies via pip |
+
+---
+
+## v1.1 — 2026-05-01  Pre-computed score cache
+
+### Problem
+
+Co-occurrence queries against the raw `allmydox.db` took 90–120 seconds per
+search on a 5 GB database (48 million rows in `noun_sentence` / `noun_paragraph`).
+Even with 9 dedicated indexes, SQLite must JOIN, group, and aggregate millions of
+rows on every keystroke — too slow for interactive use.
+
+### Solution — `cache.py`
+
+A new `cache.py` module pre-computes **all** co-occurrence scores into a separate
+flat SQLite file (`<dbname>.cache.db`), built once on first launch.
+
+**Build process**
+
+23 SQL `INSERT … SELECT` steps run via `ATTACH DATABASE` so no data is copied
+out of SQLite:
+
+| Steps | Description |
+|---|---|
+| 8 × noun_sentence | noun↔noun, noun↔name, name↔noun, name↔name — forward and reverse, weight ×1.3 |
+| 8 × noun_paragraph | same four combinations — forward and reverse, weight ×1.0 |
+| 4 × noun_verb_sentence | noun↔verb, name↔verb — both directions, weight ×1.3 |
+| 3 × word_freq | noun, name, verb occurrence counts for the global cloud view |
+
+A final consolidation step creates the permanent `cooccurrence` table from the
+raw inserts using `SELECT … SUM(score) GROUP BY`, then adds an index on
+`lower(src_word)` and drops the staging table.
+
+**Results on a 5 GB / 6,097-document database**
+
+| Metric | Before | After |
+|---|---|---|
+| Search response time | 90–120 s | 2–5 ms |
+| Cache build time (once) | — | ~4.5 min |
+| Cache file size | — | 527 MB |
+
+**App integration**
+
+`app.py` was updated with a two-stage startup:
+
+1. `_IndexWorker` ensures the 9 raw-DB indexes exist (instant on subsequent launches).
+2. `_CacheWorker` builds the cache if not yet present, showing a `QProgressDialog`
+   with per-step progress. Subsequent launches skip directly to the cloud view.
+
+All search and global-frequency lookups now go through `cache_mod.cooccurrences()`
+and `cache_mod.global_frequencies()`. Document-occurrence lookups (right-click
+panel) still use the raw database — those queries are already fast because they
+hit a small result set by document ID.
