@@ -61,7 +61,8 @@ def build(db_path: str, cache_path: str, progress: ProgressFn | None = None):
             sc REAL NOT NULL
         );
         CREATE TABLE word_freq (
-            word TEXT NOT NULL, kind TEXT NOT NULL, freq INTEGER NOT NULL
+            word TEXT NOT NULL, kind TEXT NOT NULL, freq INTEGER NOT NULL,
+            UNIQUE(word, kind)
         );
     """)
 
@@ -155,9 +156,9 @@ def update(db_path: str, cache_path: str, progress: ProgressFn | None = None):
             SELECT sw, sk, tw, tk, SUM(sc)
             FROM raw_delta GROUP BY sw, sk, tw, tk;
 
-        INSERT INTO word_freq
-            SELECT word, kind, SUM(freq)
-            FROM freq_delta GROUP BY word, kind;
+        INSERT INTO word_freq(word, kind, freq)
+            SELECT word, kind, SUM(freq) FROM freq_delta GROUP BY word, kind
+            ON CONFLICT(word, kind) DO UPDATE SET freq = freq + excluded.freq;
 
         DROP TABLE raw_delta;
         DROP TABLE freq_delta;
@@ -195,11 +196,8 @@ def cooccurrences(conn: sqlite3.Connection, word: str) -> list:
 def global_frequencies(conn: sqlite3.Connection) -> list:
     """Return rows (word, kind, freq) for the most frequent words."""
     return conn.execute("""
-        SELECT word, kind, SUM(freq) AS freq
-        FROM word_freq
-        GROUP BY word, kind
-        ORDER BY freq DESC
-        LIMIT 450
+        SELECT word, kind, freq FROM word_freq
+        ORDER BY freq DESC LIMIT 450
     """).fetchall()
 
 
