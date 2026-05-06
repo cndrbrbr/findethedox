@@ -39,7 +39,23 @@ Both scripts install PyQt6, wordcloud, pymupdf, and matplotlib.
 ## Starting the application
 
 ```bash
+python3 main.py
+```
+
+If no database path is given and `allmydox.db` is not found in the current
+directory, a file dialog opens so you can browse to the database.
+
+You can also pass the database path directly:
+
+```bash
 python3 main.py /path/to/allmydox.db
+```
+
+If the documents have been moved or the database was created on a different
+machine, pass the folder where the files now live:
+
+```bash
+python3 main.py /path/to/allmydox.db --docs /path/to/documents
 ```
 
 On the first launch the application builds search indexes on the database
@@ -135,6 +151,21 @@ Use the **◀ Prev** and **Next ▶** buttons to move between pages.
 The file content is shown as plain text. The cursor is placed at the first
 occurrence of the word and scrolled into view. Use **Ctrl + F** (or your
 operating system's find function) to locate further occurrences.
+
+---
+
+## File menu
+
+| Item | Shortcut | Description |
+|---|---|---|
+| Open Database… | Ctrl+O | Pick a different `.db` file; opens a new window |
+| Set Documents Folder… | — | Override the folder used to locate document files |
+
+**Set Documents Folder** is useful when the database was created on a
+different machine or the document files have been moved. When set, the
+application first tries the path stored in the database; if the file is
+not found there it looks for the filename inside the documents folder you
+specified.
 
 ---
 
