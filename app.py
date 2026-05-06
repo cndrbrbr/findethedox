@@ -36,19 +36,21 @@ class _IndexWorker(QThread):
 
 
 class _CacheWorker(QThread):
-    """Builds the pre-computed score cache in the background."""
+    """Builds or updates the pre-computed score cache in the background."""
     progress = pyqtSignal(str, int, int)   # label, current, total
     done     = pyqtSignal()
     error    = pyqtSignal(str)
 
-    def __init__(self, db_path: str, cache_path: str):
+    def __init__(self, db_path: str, cache_path: str, mode: str = "build"):
         super().__init__()
         self._db_path    = db_path
         self._cache_path = cache_path
+        self._mode       = mode
 
     def run(self):
+        fn = cache_mod.update if self._mode == "update" else cache_mod.build
         try:
-            cache_mod.build(
+            fn(
                 self._db_path, self._cache_path,
                 progress=lambda lbl, cur, tot: self.progress.emit(lbl, cur, tot),
             )
@@ -210,23 +212,30 @@ class MainWindow(QMainWindow):
 
     def _on_indexes_ready(self):
         if cache_mod.is_built(self._cache_path):
-            self._cache_conn = cache_mod.connect(self._cache_path)
-            self._load_global()
+            if cache_mod.needs_update(self._cache_path, self._db_path):
+                self._start_cache_worker("update")
+            else:
+                self._cache_conn = cache_mod.connect(self._cache_path)
+                self._load_global()
         else:
-            self._start_cache_build()
+            self._start_cache_worker("build")
 
-    def _start_cache_build(self):
-        self._progress_dlg = QProgressDialog(
-            "Building search cache — this runs once and takes a few minutes.",
-            None, 0, 100, self,
-        )
-        self._progress_dlg.setWindowTitle("findethedox — first launch")
+    def _start_cache_worker(self, mode: str):
+        if mode == "update":
+            title = "findethedox — cache update"
+            label = "Updating search cache with new documents…"
+        else:
+            title = "findethedox — first launch"
+            label = "Building search cache — this runs once and takes a few minutes."
+
+        self._progress_dlg = QProgressDialog(label, None, 0, 100, self)
+        self._progress_dlg.setWindowTitle(title)
         self._progress_dlg.setWindowModality(Qt.WindowModality.WindowModal)
         self._progress_dlg.setMinimumWidth(500)
         self._progress_dlg.setValue(0)
         self._progress_dlg.show()
 
-        self._cache_worker = _CacheWorker(self._db_path, self._cache_path)
+        self._cache_worker = _CacheWorker(self._db_path, self._cache_path, mode=mode)
         self._cache_worker.progress.connect(self._on_cache_progress)
         self._cache_worker.done.connect(self._on_cache_done)
         self._cache_worker.error.connect(self._on_cache_error)
