@@ -218,3 +218,63 @@ A **File** menu was added to the main window:
 |---|---|
 | `main.py` | Interactive file picker on startup; new `--docs` argument |
 | `app.py` | `docs_folder` parameter; `_build_menu()`; `_on_open_database()`; `_on_set_docs_folder()`; fallback path logic in `_on_doc_clicked()` |
+
+---
+
+## v1.3 — 2026-05-06  Incremental cache update
+
+### Problem
+
+Every time new documents were added to the source database and the cache
+file was deleted to pick them up, the full 4.5-minute build ran again from
+scratch — even though the vast majority of co-occurrence data was unchanged.
+
+### Solution
+
+The cache now stores a `max_file_id` watermark in a `meta` table written at
+the end of each build or update. On startup, `needs_update()` compares this
+value against `MAX(fileID)` in the source database. If new documents exist,
+only their co-occurrence rows are processed and merged into the existing
+cache tables instead of rebuilding from scratch.
+
+**Incremental build steps**
+
+`_build_steps()` accepts a `min_file_id` parameter. When set, each SQL step
+adds a `WHERE` clause that restricts the occurrence joins to rows with
+`fileID > min_file_id`, capturing:
+
+- New-document × new-document co-occurrences
+- New-document × existing-document co-occurrences
+
+The delta rows are inserted into staging tables (`raw_delta`, `freq_delta`),
+consolidated with `GROUP BY`, then merged into the live `cooccurrence` and
+`word_freq` tables.
+
+**`word_freq` upsert**
+
+`word_freq` has a `UNIQUE(word, kind)` constraint. The merge step uses
+`INSERT … ON CONFLICT DO UPDATE SET freq = freq + excluded.freq` so word
+frequencies are accumulated in place with no duplicate rows. This keeps
+`global_frequencies()` as a plain index scan with no aggregation overhead.
+
+**Startup flow**
+
+```
+_IndexWorker (indexes exist?)
+    └─ cache exists?
+         ├─ needs_update()? → _CacheWorker(mode="update") → show clouds
+         ├─ no              → show clouds immediately
+         └─ cache missing   → _CacheWorker(mode="build")  → show clouds
+```
+
+**Note:** existing `.cache.db` files built before v1.3 have no `meta` table
+and no `UNIQUE` constraint on `word_freq`. They continue to work as before
+but will not receive incremental updates. Delete the `.cache.db` file once
+to trigger a fresh build that enables the new behaviour.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `cache.py` | `needs_update()`; `update()`; `_build_steps()` gains `min_file_id`, `raw_table`, `freq_table`; `UNIQUE(word, kind)` on `word_freq`; `meta` table in `build()` |
+| `app.py` | `_CacheWorker` gains `mode` parameter; `_start_cache_build()` replaced by `_start_cache_worker(mode)`; `_on_indexes_ready()` calls `needs_update()` |
