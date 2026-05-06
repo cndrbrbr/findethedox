@@ -169,3 +169,52 @@ All search and global-frequency lookups now go through `cache_mod.cooccurrences(
 and `cache_mod.global_frequencies()`. Document-occurrence lookups (right-click
 panel) still use the raw database — those queries are already fast because they
 hit a small result set by document ID.
+
+---
+
+## v1.2 — 2026-05-06  Interactive database and documents folder selection
+
+### Problem
+
+The database path had to be supplied as a command-line argument, and the
+folder paths stored inside the database were absolute paths recorded at
+index time by allmydox. Both requirements made the application awkward to
+use when the database was handed to a new user or the document files had
+been moved to a different machine or directory.
+
+### Changes
+
+**Interactive database picker**
+
+`main.py` no longer exits with an error when no database path is given.
+Instead it tries the following in order:
+
+1. The path passed as a positional argument (unchanged behaviour).
+2. `allmydox.db` in the current working directory.
+3. A `QFileDialog` file picker so the user can browse to the database.
+
+**Documents folder override**
+
+A new `--docs FOLDER` command-line argument and a **File > Set Documents
+Folder…** menu item let the user specify where document files are located.
+When a document is opened, the application first tries the path stored in
+the database; if that file does not exist it looks for the filename inside
+the documents folder.
+
+**File menu**
+
+A **File** menu was added to the main window:
+
+| Item | Shortcut | Description |
+|---|---|---|
+| Open Database… | Ctrl+O | Browse to a different database; opens a new window |
+| Set Documents Folder… | — | Set the fallback folder for document files |
+
+**Dark-theme styling** was extended to cover the new menu bar and menus.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `main.py` | Interactive file picker on startup; new `--docs` argument |
+| `app.py` | `docs_folder` parameter; `_build_menu()`; `_on_open_database()`; `_on_set_docs_folder()`; fallback path logic in `_on_doc_clicked()` |
