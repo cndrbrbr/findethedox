@@ -7,7 +7,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLineEdit, QLabel, QListWidget, QListWidgetItem,
-    QSplitter, QStatusBar, QProgressDialog,
+    QSplitter, QStatusBar, QProgressDialog, QFileDialog,
 )
 
 import cache as cache_mod
@@ -63,18 +63,20 @@ class _CacheWorker(QThread):
 
 class MainWindow(QMainWindow):
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, docs_folder: str | None = None):
         super().__init__()
         self.setWindowTitle("findethedox")
         self.resize(1280, 760)
 
-        self._db_path    = db_path
-        self._cache_path = cache_mod.default_cache_path(db_path)
-        self._conn       = query.connect(db_path)          # for document lookups
-        self._cache_conn = None                            # set after cache is ready
+        self._db_path     = db_path
+        self._docs_folder = docs_folder
+        self._cache_path  = cache_mod.default_cache_path(db_path)
+        self._conn        = query.connect(db_path)         # for document lookups
+        self._cache_conn  = None                           # set after cache is ready
         self._current_word: str = ""
 
         self._build_ui()
+        self._build_menu()
         self._apply_dark_theme()
 
         # Step 1: ensure DB indexes exist (fast, only meaningful on first launch)
@@ -144,9 +146,23 @@ class MainWindow(QMainWindow):
         self._status = QStatusBar()
         self.setStatusBar(self._status)
 
+    def _build_menu(self):
+        file_menu = self.menuBar().addMenu("File")
+
+        open_db = file_menu.addAction("Open Database…")
+        open_db.setShortcut("Ctrl+O")
+        open_db.triggered.connect(self._on_open_database)
+
+        set_docs = file_menu.addAction("Set Documents Folder…")
+        set_docs.triggered.connect(self._on_set_docs_folder)
+
     def _apply_dark_theme(self):
         self.setStyleSheet("""
             QMainWindow, QWidget { background:#1e1e1e; color:#d4d4d4; }
+            QMenuBar { background:#252526; color:#d4d4d4; }
+            QMenuBar::item:selected { background:#3a3a3a; }
+            QMenu { background:#252526; color:#d4d4d4; border:1px solid #444; }
+            QMenu::item:selected { background:#264f78; }
             QLineEdit {
                 background:#2d2d2d; border:1px solid #555;
                 border-radius:4px; padding:4px 8px; color:#d4d4d4;
@@ -165,6 +181,28 @@ class MainWindow(QMainWindow):
             QScrollArea { border:none; }
             QProgressDialog { background:#1e1e1e; color:#d4d4d4; }
         """)
+
+    # ------------------------------------------------------------------
+    # Menu actions
+    # ------------------------------------------------------------------
+
+    def _on_open_database(self):
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Open allmydox database", str(Path(self._db_path).parent),
+            "SQLite databases (*.db);;All files (*)",
+        )
+        if not chosen:
+            return
+        new_win = MainWindow(chosen, docs_folder=self._docs_folder)
+        new_win.show()
+        self.close()
+
+    def _on_set_docs_folder(self):
+        start = self._docs_folder or str(Path(self._db_path).parent)
+        folder = QFileDialog.getExistingDirectory(self, "Select documents folder", start)
+        if folder:
+            self._docs_folder = folder
+            self._status.showMessage(f"Documents folder: {folder}", 5000)
 
     # ------------------------------------------------------------------
     # Startup sequence: indexes → cache → show clouds
@@ -234,8 +272,10 @@ class MainWindow(QMainWindow):
 
     def _on_doc_clicked(self, item: QListWidgetItem):
         occ: query.DocOccurrence = item.data(Qt.ItemDataRole.UserRole)
-        filepath = str(Path(occ.folderpath) / occ.filename)
-        dlg = DocViewerDialog(filepath, occ.pagenumber, self._current_word, self)
+        filepath = Path(occ.folderpath) / occ.filename
+        if not filepath.exists() and self._docs_folder:
+            filepath = Path(self._docs_folder) / occ.filename
+        dlg = DocViewerDialog(str(filepath), occ.pagenumber, self._current_word, self)
         dlg.exec()
 
     # ------------------------------------------------------------------
