@@ -7,10 +7,11 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLineEdit, QLabel, QListWidget, QListWidgetItem,
-    QSplitter, QStatusBar, QProgressDialog, QFileDialog,
+    QSplitter, QStatusBar, QProgressDialog, QFileDialog, QMessageBox,
 )
 
 import cache as cache_mod
+import config as config_mod
 import query
 from cloud_widget import CloudWidget
 from doc_viewer import DocViewerDialog
@@ -65,14 +66,19 @@ class _CacheWorker(QThread):
 
 class MainWindow(QMainWindow):
 
-    def __init__(self, db_path: str, docs_folder: str | None = None):
+    def __init__(
+        self,
+        db_path: str,
+        docs_folder: str | None = None,
+        cache_path: str | None = None,
+    ):
         super().__init__()
         self.setWindowTitle("findethedox")
         self.resize(1280, 760)
 
         self._db_path     = db_path
         self._docs_folder = docs_folder
-        self._cache_path  = cache_mod.default_cache_path(db_path)
+        self._cache_path  = cache_path or cache_mod.default_cache_path(db_path)
         self._conn        = query.connect(db_path)         # for document lookups
         self._cache_conn  = None                           # set after cache is ready
         self._current_word: str = ""
@@ -155,8 +161,19 @@ class MainWindow(QMainWindow):
         open_db.setShortcut("Ctrl+O")
         open_db.triggered.connect(self._on_open_database)
 
-        set_docs = file_menu.addAction("Set Documents Folder…")
+        settings_menu = self.menuBar().addMenu("Settings")
+
+        set_docs = settings_menu.addAction("Set Documents Folder…")
         set_docs.triggered.connect(self._on_set_docs_folder)
+
+        set_cache = settings_menu.addAction("Set Cache File…")
+        set_cache.triggered.connect(self._on_set_cache_path)
+
+        toolbar = self.addToolBar("Tools")
+        toolbar.setMovable(False)
+        rebuild_action = toolbar.addAction("Rebuild Cache")
+        rebuild_action.setToolTip("Delete the existing cache and rebuild it from scratch")
+        rebuild_action.triggered.connect(self._on_rebuild_cache)
 
     def _apply_dark_theme(self):
         self.setStyleSheet("""
@@ -204,7 +221,39 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Select documents folder", start)
         if folder:
             self._docs_folder = folder
+            self._save_config()
             self._status.showMessage(f"Documents folder: {folder}", 5000)
+
+    def _on_set_cache_path(self):
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, "Set Cache File Location", self._cache_path,
+            "SQLite databases (*.db);;All files (*)",
+        )
+        if chosen:
+            self._cache_path = chosen
+            self._save_config()
+            self._status.showMessage(f"Cache path: {chosen}", 5000)
+
+    def _on_rebuild_cache(self):
+        reply = QMessageBox.question(
+            self, "Rebuild Cache",
+            "This will delete the existing cache and rebuild it from scratch.\n"
+            "The operation may take several minutes.\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        if self._cache_conn:
+            self._cache_conn.close()
+            self._cache_conn = None
+        self._start_cache_worker("build")
+
+    def _save_config(self):
+        cfg = config_mod.load()
+        cfg["db_path"]     = self._db_path
+        cfg["docs_folder"] = self._docs_folder
+        cfg["cache_path"]  = self._cache_path
+        config_mod.save(cfg)
 
     # ------------------------------------------------------------------
     # Startup sequence: indexes → cache → show clouds
@@ -212,11 +261,9 @@ class MainWindow(QMainWindow):
 
     def _on_indexes_ready(self):
         if cache_mod.is_built(self._cache_path):
-            if cache_mod.needs_update(self._cache_path, self._db_path):
-                self._start_cache_worker("update")
-            else:
-                self._cache_conn = cache_mod.connect(self._cache_path)
-                self._load_global()
+            # Cache exists — use it as-is; user can rebuild via the toolbar button
+            self._cache_conn = cache_mod.connect(self._cache_path)
+            self._load_global()
         else:
             self._start_cache_worker("build")
 
