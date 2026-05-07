@@ -278,3 +278,67 @@ to trigger a fresh build that enables the new behaviour.
 |---|---|
 | `cache.py` | `needs_update()`; `update()`; `_build_steps()` gains `min_file_id`, `raw_table`, `freq_table`; `UNIQUE(word, kind)` on `word_freq`; `meta` table in `build()` |
 | `app.py` | `_CacheWorker` gains `mode` parameter; `_start_cache_build()` replaced by `_start_cache_worker(mode)`; `_on_indexes_ready()` calls `needs_update()` |
+
+---
+
+## v1.4 — 2026-05-07  Configurable paths; manual cache rebuild
+
+### Problem
+
+The database path, documents folder, and cache file location were either
+hard-coded or had to be re-supplied on every launch. The cache also
+auto-updated silently on startup whenever new documents were found, giving
+the user no control over when a potentially long rebuild happens.
+
+### Changes
+
+**Persistent settings — `config.py`**
+
+A new `config.py` module stores the three user-configurable paths in
+`~/.config/findethedox/config.json`. Settings are written whenever the user
+changes a path and are read on the next launch as defaults.
+
+**Settings menu**
+
+A new **Settings** menu replaces the old **File > Set Documents Folder…**
+item and exposes both path options:
+
+| Item | Description |
+|---|---|
+| Set Documents Folder… | Fallback folder for document files |
+| Set Cache File… | Location of the pre-computed cache database |
+
+**Rebuild Cache toolbar button**
+
+A toolbar button labelled **Rebuild Cache** triggers a full cache rebuild
+after a confirmation dialog. This replaces the previous auto-update
+behaviour: the application no longer silently rebuilds or updates the cache
+on startup.
+
+**Startup flow change**
+
+`_on_indexes_ready()` no longer calls `needs_update()`. If a cache file is
+present it is used immediately; if no cache exists the initial build runs
+as before.
+
+```
+_IndexWorker (indexes exist?)
+    └─ cache exists? → connect and show clouds
+    └─ cache missing → _CacheWorker(mode="build") → show clouds
+
+"Rebuild Cache" button → confirmation → _CacheWorker(mode="build")
+```
+
+**CLI**
+
+`main.py` gains a `--cache FILE` argument to override the cache path from
+the command line. On startup the priority order is:
+CLI arg > saved config > auto-derived path (next to the database file).
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `config.py` | New module: `load()` / `save()` for `~/.config/findethedox/config.json` |
+| `main.py` | Loads config on startup; new `--cache` argument; passes `docs_folder` and `cache_path` to `MainWindow` |
+| `app.py` | `MainWindow` accepts optional `cache_path`; Settings menu; Rebuild Cache toolbar button; `_save_config()`; startup no longer auto-updates cache |
