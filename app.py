@@ -60,6 +60,39 @@ class _CacheWorker(QThread):
             self.error.emit(str(exc))
 
 
+class _SearchWorker(QThread):
+    """Runs co-occurrence lookup and document list queries in the background."""
+    cooc_ready = pyqtSignal(list, str)   # (list of dicts, word)
+    docs_ready = pyqtSignal(list, str)   # (list[DocOccurrence], word)
+    not_found  = pyqtSignal(str)
+    error      = pyqtSignal(str)
+
+    def __init__(self, db_path: str, cache_path: str, word: str, docs_only: bool = False):
+        super().__init__()
+        self._db_path    = db_path
+        self._cache_path = cache_path
+        self._word       = word
+        self._docs_only  = docs_only
+
+    def run(self):
+        try:
+            if not self._docs_only:
+                cc = cache_mod.connect(self._cache_path)
+                rows = [dict(r) for r in cache_mod.cooccurrences(cc, self._word)]
+                cc.close()
+                if not rows:
+                    self.not_found.emit(self._word)
+                    return
+                self.cooc_ready.emit(rows, self._word)
+
+            dc = query.connect(self._db_path)
+            occs = query.document_occurrences(dc, self._word)
+            dc.close()
+            self.docs_ready.emit(occs, self._word)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
 # ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
@@ -82,6 +115,7 @@ class MainWindow(QMainWindow):
         self._conn        = query.connect(db_path)         # for document lookups
         self._cache_conn  = None                           # set after cache is ready
         self._current_word: str = ""
+        self._search_worker: _SearchWorker | None = None
 
         self._build_ui()
         self._build_menu()
@@ -315,16 +349,14 @@ class MainWindow(QMainWindow):
         if not word:
             self._load_global()
         else:
-            self._load_cooccurrences(word)
-            self._show_documents(word)
+            self._start_search(word)
 
     def _on_left_click(self, word: str):
         self._search.setText(word)
-        self._load_cooccurrences(word)
-        self._show_documents(word)
+        self._start_search(word)
 
     def _on_right_click(self, word: str):
-        self._show_documents(word)
+        self._start_search(word, docs_only=True)
 
     def _on_doc_clicked(self, item: QListWidgetItem):
         occ: query.DocOccurrence = item.data(Qt.ItemDataRole.UserRole)
@@ -341,61 +373,53 @@ class MainWindow(QMainWindow):
     def _load_global(self):
         if self._cache_conn is None:
             return
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        QApplication.processEvents()
-        try:
-            self._status.showMessage("Loading…")
-            rows = cache_mod.global_frequencies(self._cache_conn)
-            words = [query.WordScore(r["word"], r["kind"], float(r["freq"])) for r in rows]
-            self._update_clouds(words)
-            self._status.showMessage(
-                f"{self._db_path}  —  type a word and press Enter to search", 0
-            )
-        finally:
-            QApplication.restoreOverrideCursor()
+        self._status.showMessage("Loading…")
+        rows = cache_mod.global_frequencies(self._cache_conn)
+        words = [query.WordScore(r["word"], r["kind"], float(r["freq"])) for r in rows]
+        self._update_clouds(words)
+        self._status.showMessage(
+            f"{self._db_path}  —  type a word and press Enter to search", 0
+        )
 
-    def _load_cooccurrences(self, word: str):
+    def _start_search(self, word: str, docs_only: bool = False):
         if self._cache_conn is None:
             self._status.showMessage("Cache not ready yet.", 3000)
             return
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        QApplication.processEvents()
-        try:
-            self._status.showMessage(f'Searching for "{word}"…')
-            rows = cache_mod.cooccurrences(self._cache_conn, word)
-            if not rows:
-                self._status.showMessage(f'"{word}" not found in database.', 4000)
-                return
-            words = [query.WordScore(r["tgt_word"], r["tgt_kind"], float(r["score"])) for r in rows]
-            self._update_clouds(words)
-            total = sum(r["score"] for r in rows)
-            self._status.showMessage(
-                f'"{word}" — {len(rows)} related words, total score {total:,.0f}', 0
-            )
-        finally:
-            QApplication.restoreOverrideCursor()
+        self._status.showMessage(f'Searching for "{word}"…')
+        self._search_worker = _SearchWorker(
+            self._db_path, self._cache_path, word, docs_only=docs_only
+        )
+        self._search_worker.cooc_ready.connect(self._on_cooc_ready)
+        self._search_worker.docs_ready.connect(self._on_docs_ready)
+        self._search_worker.not_found.connect(
+            lambda w: self._status.showMessage(f'"{w}" not found in database.', 4000)
+        )
+        self._search_worker.error.connect(
+            lambda msg: self._status.showMessage(f"Search error: {msg}", 5000)
+        )
+        self._search_worker.start()
 
-    def _show_documents(self, word: str):
+    def _on_cooc_ready(self, rows: list, word: str):
+        words = [query.WordScore(r["tgt_word"], r["tgt_kind"], float(r["score"])) for r in rows]
+        self._update_clouds(words)
+        total = sum(r["score"] for r in rows)
+        self._status.showMessage(
+            f'"{word}" — {len(rows)} related words, total score {total:,.0f}', 0
+        )
+
+    def _on_docs_ready(self, occs: list, word: str):
         self._current_word = word
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        QApplication.processEvents()
-        try:
-            occs = query.document_occurrences(self._conn, word)
-            self._doc_list.clear()
-
-            seen: set[str] = set()
-            for occ in occs:
-                key = f"{occ.folderpath}/{occ.filename}"
-                if key not in seen:
-                    seen.add(key)
-                    item = QListWidgetItem(f"{occ.filename}  (p.{occ.pagenumber})")
-                    item.setData(Qt.ItemDataRole.UserRole, occ)
-                    self._doc_list.addItem(item)
-
-            self._doc_title.setText(f'"{word}" in {self._doc_list.count()} document(s)')
-            self._right_panel.setVisible(True)
-        finally:
-            QApplication.restoreOverrideCursor()
+        self._doc_list.clear()
+        seen: set[str] = set()
+        for occ in occs:
+            key = f"{occ.folderpath}/{occ.filename}"
+            if key not in seen:
+                seen.add(key)
+                item = QListWidgetItem(f"{occ.filename}  (p.{occ.pagenumber})")
+                item.setData(Qt.ItemDataRole.UserRole, occ)
+                self._doc_list.addItem(item)
+        self._doc_title.setText(f'"{word}" in {self._doc_list.count()} document(s)')
+        self._right_panel.setVisible(True)
 
     def _update_clouds(self, words: list[query.WordScore]):
         for cw in self._clouds.values():

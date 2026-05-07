@@ -342,3 +342,47 @@ CLI arg > saved config > auto-derived path (next to the database file).
 | `config.py` | New module: `load()` / `save()` for `~/.config/findethedox/config.json` |
 | `main.py` | Loads config on startup; new `--cache` argument; passes `docs_folder` and `cache_path` to `MainWindow` |
 | `app.py` | `MainWindow` accepts optional `cache_path`; Settings menu; Rebuild Cache toolbar button; `_save_config()`; startup no longer auto-updates cache |
+
+---
+
+## v1.5 — 2026-05-07  Non-blocking search
+
+### Problem
+
+Every search — triggered by pressing Enter, left-clicking a cloud word, or
+right-clicking for the document list — ran synchronously on the Qt main
+thread. The co-occurrence lookup hits the cache (fast, ~5 ms), but the
+document-occurrence query issues three separate JOIN queries against the raw
+5 GB database and can take several seconds. During that time Qt's event loop
+was blocked, causing the OS to display a "not responding" dialog.
+
+### Solution — `_SearchWorker`
+
+A new `_SearchWorker(QThread)` class runs both queries in a background
+thread and delivers results back to the main thread via signals:
+
+| Signal | Payload | Triggered when |
+|---|---|---|
+| `cooc_ready` | list of result dicts, word | co-occurrence rows found in cache |
+| `docs_ready` | list of `DocOccurrence`, word | document list ready from raw DB |
+| `not_found` | word | cache returned no results |
+| `error` | message | exception in worker thread |
+
+The worker opens its own database connections (SQLite connections must not
+be shared across threads), runs the queries, converts `sqlite3.Row` objects
+to plain dicts before crossing the thread boundary, then emits the signals.
+
+The synchronous `_load_cooccurrences()` and `_show_documents()` methods were
+replaced by `_start_search(word, docs_only=False)`, which creates and starts
+a `_SearchWorker`. Result handlers `_on_cooc_ready()` and `_on_docs_ready()`
+update the clouds and document panel on the main thread.
+
+`_load_global()` (startup / empty search box) continues to run on the main
+thread because it queries the already-open in-memory cache connection and
+completes in < 5 ms.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `app.py` | Added `_SearchWorker`; replaced synchronous search methods with `_start_search()`, `_on_cooc_ready()`, `_on_docs_ready()`; removed `WaitCursor` blocks from search path |
