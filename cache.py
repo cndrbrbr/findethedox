@@ -2,6 +2,7 @@
 Pre-compute all co-occurrence scores into a flat SQLite cache.
 Build once (~5 min for large DBs), then every search is a single indexed SELECT.
 Subsequent runs only process documents added since the last build/update.
+Multiple source databases are supported: pass a list of paths to build/update.
 """
 import os
 import sqlite3
@@ -11,72 +12,93 @@ from typing import Callable
 ProgressFn = Callable[[str, int, int], None]
 
 
-def default_cache_path(db_path: str) -> str:
-    return str(Path(db_path).with_suffix("")) + ".cache.db"
+def _norm(db_paths) -> list[str]:
+    """Accept a single path string or a list; always return a list."""
+    return [db_paths] if isinstance(db_paths, str) else list(db_paths)
+
+
+def default_cache_path(db_paths) -> str:
+    return str(Path(_norm(db_paths)[0]).with_suffix("")) + ".cache.db"
 
 
 def is_built(cache_path: str) -> bool:
     return Path(cache_path).exists()
 
 
-def needs_update(cache_path: str, db_path: str) -> bool:
-    """Return True if the source DB has documents not yet reflected in the cache."""
-    try:
-        cc = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
-        row = cc.execute("SELECT value FROM meta WHERE key='max_file_id'").fetchone()
-        cc.close()
-        last_file_id = int(row[0]) if row else 0
-    except Exception:
-        return False   # old cache without meta table — leave it alone
+def needs_update(cache_path: str, db_paths) -> bool:
+    """Return True if any source DB has documents not yet in the cache."""
+    for db_path in _norm(db_paths):
+        try:
+            cc = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
+            row = cc.execute("SELECT value FROM meta WHERE key=?",
+                             (f"src:{db_path}",)).fetchone()
+            if row is None:   # legacy single-source cache
+                row = cc.execute(
+                    "SELECT value FROM meta WHERE key='max_file_id'"
+                ).fetchone()
+            cc.close()
+            last = int(row[0]) if row else 0
+        except Exception:
+            return False
+        try:
+            sc = sqlite3.connect(db_path)
+            row = sc.execute("SELECT MAX(fileID) FROM documents").fetchone()
+            sc.close()
+            cur = int(row[0]) if row and row[0] else 0
+        except Exception:
+            return False
+        if cur > last:
+            return True
+    return False
 
-    try:
-        sc = sqlite3.connect(db_path)
-        row = sc.execute("SELECT MAX(fileID) FROM documents").fetchone()
-        sc.close()
-        cur_max = int(row[0]) if row and row[0] else 0
-    except Exception:
-        return False
 
-    return cur_max > last_file_id
-
-
-def build(db_path: str, cache_path: str, progress: ProgressFn | None = None):
+def build(db_paths, cache_path: str, progress: ProgressFn | None = None):
     """
-    Read allmydox.db and write a pre-aggregated cache.
+    Read one or more allmydox databases and write a pre-aggregated cache.
     Tables produced:
       cooccurrence(src_word, src_kind, tgt_word, tgt_kind, score)
       word_freq(word, kind, freq)
-      meta(key, value)            — stores max_file_id watermark
+      meta(key, value)  — per-source max_file_id watermarks as 'src:<path>'
     """
+    paths = _norm(db_paths)
+
     if os.path.exists(cache_path):
         os.remove(cache_path)
 
     conn = sqlite3.connect(cache_path)
     conn.executescript("PRAGMA journal_mode=WAL; PRAGMA cache_size=-131072;")
-    conn.execute(f"ATTACH DATABASE '{db_path}' AS src")
     conn.executescript("""
         CREATE TABLE raw (
             sw TEXT NOT NULL, sk TEXT NOT NULL,
             tw TEXT NOT NULL, tk TEXT NOT NULL,
             sc REAL NOT NULL
         );
-        CREATE TABLE word_freq (
-            word TEXT NOT NULL, kind TEXT NOT NULL, freq INTEGER NOT NULL,
-            UNIQUE(word, kind)
+        CREATE TABLE freq_raw (
+            word TEXT NOT NULL, kind TEXT NOT NULL, freq INTEGER NOT NULL
         );
     """)
 
-    steps = _build_steps()
-    total = len(steps) + 1   # +1 for consolidation
+    steps = _build_steps(freq_table="freq_raw")
+    total = len(paths) * len(steps) + 1   # +1 for consolidation
+    source_maxes: dict[str, int] = {}
+    offset = 0
 
-    for i, (label, sql) in enumerate(steps):
-        if progress:
-            progress(label, i, total)
-        conn.execute(sql)
-        conn.commit()
+    for db_path in paths:
+        name = Path(db_path).name
+        conn.execute(f"ATTACH DATABASE '{db_path.replace(chr(39), chr(39)*2)}' AS src")
+        for i, (label, sql) in enumerate(steps):
+            if progress:
+                lbl = f"[{name}] {label}" if len(paths) > 1 else label
+                progress(lbl, offset + i, total)
+            conn.execute(sql)
+            conn.commit()
+        row = conn.execute("SELECT MAX(fileID) FROM src.documents").fetchone()
+        source_maxes[db_path] = int(row[0]) if row and row[0] else 0
+        conn.execute("DETACH DATABASE src")
+        offset += len(steps)
 
     if progress:
-        progress("Consolidating and indexing…", len(steps), total)
+        progress("Consolidating and indexing…", total - 1, total)
 
     conn.executescript("""
         CREATE TABLE cooccurrence AS
@@ -88,15 +110,22 @@ def build(db_path: str, cache_path: str, progress: ProgressFn | None = None):
 
         DROP TABLE raw;
 
+        CREATE TABLE word_freq AS
+            SELECT word, kind, SUM(freq) AS freq
+            FROM freq_raw
+            GROUP BY word, kind;
+
+        DROP TABLE freq_raw;
+
+        CREATE UNIQUE INDEX idx_wf_uk ON word_freq(word, kind);
         CREATE INDEX idx_cooc ON cooccurrence(lower(src_word));
         CREATE INDEX idx_wf   ON word_freq(kind, freq DESC);
     """)
 
-    # Store the highest fileID so future runs can do incremental updates
-    row = conn.execute("SELECT MAX(fileID) FROM src.documents").fetchone()
-    max_file_id = int(row[0]) if row and row[0] else 0
     conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-    conn.execute("INSERT INTO meta VALUES ('max_file_id', ?)", (str(max_file_id),))
+    for db_path, max_id in source_maxes.items():
+        conn.execute("INSERT INTO meta VALUES (?, ?)",
+                     (f"src:{db_path}", str(max_id)))
     conn.commit()
     conn.close()
 
@@ -104,69 +133,100 @@ def build(db_path: str, cache_path: str, progress: ProgressFn | None = None):
         progress("Done", total, total)
 
 
-def update(db_path: str, cache_path: str, progress: ProgressFn | None = None):
+def update(db_paths, cache_path: str, progress: ProgressFn | None = None):
     """
-    Append scores for documents added to the source DB since the cache was
-    last built or updated.  Reads the max_file_id watermark from the meta
-    table and only processes occurrence rows with fileID > watermark.
+    Append scores for documents added to any source DB since the cache was
+    last built or updated.  Each source has its own max_file_id watermark.
     """
+    paths = _norm(db_paths)
     conn = sqlite3.connect(cache_path)
     conn.executescript("PRAGMA journal_mode=WAL; PRAGMA cache_size=-131072;")
-    conn.execute(f"ATTACH DATABASE '{db_path}' AS src")
 
-    row = conn.execute("SELECT value FROM meta WHERE key='max_file_id'").fetchone()
-    last_file_id = int(row[0]) if row else 0
+    # Determine which sources have new documents
+    sources_to_update: list[tuple[str, int, int]] = []
+    for db_path in paths:
+        try:
+            row = conn.execute("SELECT value FROM meta WHERE key=?",
+                               (f"src:{db_path}",)).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key='max_file_id'"
+                ).fetchone()
+            last = int(row[0]) if row else 0
+        except Exception:
+            last = 0
+        try:
+            esc = db_path.replace("'", "''")
+            conn.execute(f"ATTACH DATABASE '{esc}' AS src")
+            row = conn.execute("SELECT MAX(fileID) FROM src.documents").fetchone()
+            cur = int(row[0]) if row and row[0] else 0
+            conn.execute("DETACH DATABASE src")
+        except Exception:
+            cur = 0
+        if cur > last:
+            sources_to_update.append((db_path, last, cur))
 
-    row = conn.execute("SELECT MAX(fileID) FROM src.documents").fetchone()
-    cur_max = int(row[0]) if row and row[0] else 0
-
-    if cur_max <= last_file_id:
+    if not sources_to_update:
         conn.close()
         if progress:
             progress("Already up to date", 1, 1)
         return
 
-    conn.executescript("""
-        CREATE TABLE raw_delta (
-            sw TEXT NOT NULL, sk TEXT NOT NULL,
-            tw TEXT NOT NULL, tk TEXT NOT NULL,
-            sc REAL NOT NULL
-        );
-        CREATE TABLE freq_delta (
-            word TEXT NOT NULL, kind TEXT NOT NULL, freq INTEGER NOT NULL
-        );
-    """)
+    n_steps = len(_build_steps())
+    total = len(sources_to_update) * (n_steps + 1)
+    offset = 0
 
-    steps = _build_steps(min_file_id=last_file_id,
-                         raw_table="raw_delta", freq_table="freq_delta")
-    total = len(steps) + 1
+    for db_path, last_file_id, cur_max in sources_to_update:
+        name = Path(db_path).name
+        conn.executescript("""
+            CREATE TABLE raw_delta (
+                sw TEXT NOT NULL, sk TEXT NOT NULL,
+                tw TEXT NOT NULL, tk TEXT NOT NULL,
+                sc REAL NOT NULL
+            );
+            CREATE TABLE freq_delta (
+                word TEXT NOT NULL, kind TEXT NOT NULL, freq INTEGER NOT NULL
+            );
+        """)
 
-    for i, (label, sql) in enumerate(steps):
+        esc = db_path.replace("'", "''")
+        conn.execute(f"ATTACH DATABASE '{esc}' AS src")
+
+        delta_steps = _build_steps(min_file_id=last_file_id,
+                                   raw_table="raw_delta",
+                                   freq_table="freq_delta")
+        for i, (label, sql) in enumerate(delta_steps):
+            if progress:
+                lbl = f"[{name}] {label}" if len(sources_to_update) > 1 else label
+                progress(lbl, offset + i, total)
+            conn.execute(sql)
+            conn.commit()
+
         if progress:
-            progress(label, i, total)
-        conn.execute(sql)
+            lbl = f"[{name}] Merging…" if len(sources_to_update) > 1 else "Merging into cache…"
+            progress(lbl, offset + n_steps, total)
+
+        conn.executescript("""
+            INSERT INTO cooccurrence
+                SELECT sw, sk, tw, tk, SUM(sc)
+                FROM raw_delta GROUP BY sw, sk, tw, tk;
+
+            INSERT INTO word_freq(word, kind, freq)
+                SELECT word, kind, SUM(freq) FROM freq_delta GROUP BY word, kind
+                ON CONFLICT(word, kind) DO UPDATE SET freq = freq + excluded.freq;
+
+            DROP TABLE raw_delta;
+            DROP TABLE freq_delta;
+        """)
+        conn.execute("""
+            INSERT INTO meta VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """, (f"src:{db_path}", str(cur_max)))
         conn.commit()
+        conn.execute("DETACH DATABASE src")
+        offset += n_steps + 1
 
-    if progress:
-        progress("Merging into cache…", len(steps), total)
-
-    # Merge delta into the live tables and advance the watermark
-    conn.executescript("""
-        INSERT INTO cooccurrence
-            SELECT sw, sk, tw, tk, SUM(sc)
-            FROM raw_delta GROUP BY sw, sk, tw, tk;
-
-        INSERT INTO word_freq(word, kind, freq)
-            SELECT word, kind, SUM(freq) FROM freq_delta GROUP BY word, kind
-            ON CONFLICT(word, kind) DO UPDATE SET freq = freq + excluded.freq;
-
-        DROP TABLE raw_delta;
-        DROP TABLE freq_delta;
-    """)
-    conn.execute("UPDATE meta SET value=? WHERE key='max_file_id'", (str(cur_max),))
-    conn.commit()
     conn.close()
-
     if progress:
         progress("Done", total, total)
 
