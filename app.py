@@ -22,17 +22,18 @@ from doc_viewer import DocViewerDialog
 # ---------------------------------------------------------------------------
 
 class _IndexWorker(QThread):
-    """Ensures allmydox co-occurrence indexes exist (one-time, fast after first run)."""
+    """Ensures allmydox co-occurrence indexes exist on all source DBs."""
     done = pyqtSignal()
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_paths: list):
         super().__init__()
-        self._db_path = db_path
+        self._db_paths = db_paths
 
     def run(self):
-        conn = query.connect(self._db_path)
-        query.ensure_indexes(conn)
-        conn.close()
+        for db_path in self._db_paths:
+            conn = query.connect(db_path)
+            query.ensure_indexes(conn)
+            conn.close()
         self.done.emit()
 
 
@@ -42,9 +43,9 @@ class _CacheWorker(QThread):
     done     = pyqtSignal()
     error    = pyqtSignal(str)
 
-    def __init__(self, db_path: str, cache_path: str, mode: str = "build"):
+    def __init__(self, db_paths: list, cache_path: str, mode: str = "build"):
         super().__init__()
-        self._db_path    = db_path
+        self._db_paths   = db_paths
         self._cache_path = cache_path
         self._mode       = mode
 
@@ -52,7 +53,7 @@ class _CacheWorker(QThread):
         fn = cache_mod.update if self._mode == "update" else cache_mod.build
         try:
             fn(
-                self._db_path, self._cache_path,
+                self._db_paths, self._cache_path,
                 progress=lambda lbl, cur, tot: self.progress.emit(lbl, cur, tot),
             )
             self.done.emit()
@@ -67,9 +68,9 @@ class _SearchWorker(QThread):
     not_found  = pyqtSignal(str)
     error      = pyqtSignal(str)
 
-    def __init__(self, db_path: str, cache_path: str, word: str, docs_only: bool = False):
+    def __init__(self, db_paths: list, cache_path: str, word: str, docs_only: bool = False):
         super().__init__()
-        self._db_path    = db_path
+        self._db_paths   = db_paths
         self._cache_path = cache_path
         self._word       = word
         self._docs_only  = docs_only
@@ -85,10 +86,20 @@ class _SearchWorker(QThread):
                     return
                 self.cooc_ready.emit(rows, self._word)
 
-            dc = query.connect(self._db_path)
-            occs = query.document_occurrences(dc, self._word)
-            dc.close()
-            self.docs_ready.emit(occs, self._word)
+            occs: list[query.DocOccurrence] = []
+            for db_path in self._db_paths:
+                dc = query.connect(db_path)
+                occs.extend(query.document_occurrences(dc, self._word))
+                dc.close()
+            # Deduplicate across sources
+            seen: set[tuple] = set()
+            unique: list[query.DocOccurrence] = []
+            for occ in sorted(occs, key=lambda o: (o.filename, o.pagenumber)):
+                key = (occ.filename, occ.folderpath, occ.pagenumber)
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(occ)
+            self.docs_ready.emit(unique, self._word)
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -119,18 +130,18 @@ class MainWindow(QMainWindow):
 
     def __init__(
         self,
-        db_path: str,
+        db_paths,
         docs_folder: str | None = None,
         cache_path: str | None = None,
     ):
         super().__init__()
-        self.setWindowTitle("findethedox")
         self.resize(1280, 760)
 
-        self._db_path     = db_path
+        if isinstance(db_paths, str):
+            db_paths = [db_paths]
+        self._db_paths    = db_paths
         self._docs_folder = docs_folder
-        self._cache_path  = cache_path or cache_mod.default_cache_path(db_path)
-        self._conn        = query.connect(db_path)         # for document lookups
+        self._cache_path  = cache_path or cache_mod.default_cache_path(db_paths)
         self._cache_conn  = None                           # set after cache is ready
         self._current_word: str = ""
         self._search_worker: _SearchWorker | None = None
@@ -140,9 +151,10 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._apply_dark_theme()
+        self._update_title()
 
         # Step 1: ensure DB indexes exist (fast, only meaningful on first launch)
-        self._index_worker = _IndexWorker(db_path)
+        self._index_worker = _IndexWorker(self._db_paths)
         self._index_worker.done.connect(self._on_indexes_ready)
         self._status.showMessage("Checking database indexes…")
         self._index_worker.start()
@@ -242,12 +254,22 @@ class MainWindow(QMainWindow):
         self._status = QStatusBar()
         self.setStatusBar(self._status)
 
+    def _update_title(self):
+        if len(self._db_paths) == 1:
+            self.setWindowTitle(f"findethedox — {Path(self._db_paths[0]).name}")
+        else:
+            self.setWindowTitle(f"findethedox — {len(self._db_paths)} databases")
+
     def _build_menu(self):
         file_menu = self.menuBar().addMenu("File")
 
         open_db = file_menu.addAction("Open Database…")
         open_db.setShortcut("Ctrl+O")
         open_db.triggered.connect(self._on_open_database)
+
+        add_db = file_menu.addAction("Add Database…")
+        add_db.setShortcut("Ctrl+Shift+O")
+        add_db.triggered.connect(self._on_add_database)
 
         settings_menu = self.menuBar().addMenu("Settings")
 
@@ -295,12 +317,27 @@ class MainWindow(QMainWindow):
 
     def _on_open_database(self):
         chosen, _ = QFileDialog.getOpenFileName(
-            self, "Open allmydox database", str(Path(self._db_path).parent),
+            self, "Open allmydox database", str(Path(self._db_paths[0]).parent),
             "SQLite databases (*.db);;All files (*)",
         )
         if not chosen:
             return
-        new_win = MainWindow(chosen, docs_folder=self._docs_folder)
+        new_win = MainWindow([chosen], docs_folder=self._docs_folder)
+        new_win.show()
+        self.close()
+
+    def _on_add_database(self):
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Add allmydox database", str(Path(self._db_paths[-1]).parent),
+            "SQLite databases (*.db);;All files (*)",
+        )
+        if not chosen or chosen in self._db_paths:
+            return
+        new_win = MainWindow(
+            self._db_paths + [chosen],
+            docs_folder=self._docs_folder,
+            cache_path=self._cache_path,
+        )
         new_win.show()
         self.close()
 
@@ -338,7 +375,7 @@ class MainWindow(QMainWindow):
 
     def _save_config(self):
         cfg = config_mod.load()
-        cfg["db_path"]     = self._db_path
+        cfg["db_paths"]    = self._db_paths
         cfg["docs_folder"] = self._docs_folder
         cfg["cache_path"]  = self._cache_path
         config_mod.save(cfg)
@@ -370,7 +407,7 @@ class MainWindow(QMainWindow):
         self._progress_dlg.setValue(0)
         self._progress_dlg.show()
 
-        self._cache_worker = _CacheWorker(self._db_path, self._cache_path, mode=mode)
+        self._cache_worker = _CacheWorker(self._db_paths, self._cache_path, mode=mode)
         self._cache_worker.progress.connect(self._on_cache_progress)
         self._cache_worker.done.connect(self._on_cache_done)
         self._cache_worker.error.connect(self._on_cache_error)
@@ -431,9 +468,8 @@ class MainWindow(QMainWindow):
         rows = cache_mod.global_frequencies(self._cache_conn)
         words = [query.WordScore(r["word"], r["kind"], float(r["freq"])) for r in rows]
         self._update_clouds(words)
-        self._status.showMessage(
-            f"{self._db_path}  —  type a word and press Enter to search", 0
-        )
+        names = ", ".join(Path(p).name for p in self._db_paths)
+        self._status.showMessage(f"{names}  —  type a word and press Enter to search", 0)
 
     def _start_search(self, word: str, docs_only: bool = False):
         if self._cache_conn is None:
@@ -441,7 +477,7 @@ class MainWindow(QMainWindow):
             return
         self._status.showMessage(f'Searching for "{word}"…')
         self._search_worker = _SearchWorker(
-            self._db_path, self._cache_path, word, docs_only=docs_only
+            self._db_paths, self._cache_path, word, docs_only=docs_only
         )
         self._search_worker.cooc_ready.connect(self._on_cooc_ready)
         self._search_worker.docs_ready.connect(self._on_docs_ready)
