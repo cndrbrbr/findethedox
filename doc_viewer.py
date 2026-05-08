@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -147,3 +148,33 @@ class _TextViewer(QWidget):
         if not cursor.isNull():
             editor.setTextCursor(cursor)
             editor.ensureCursorVisible()
+
+
+# ---------------------------------------------------------------------------
+# Sentence extraction (used by the sentence panel in app.py)
+# ---------------------------------------------------------------------------
+
+def sentences_containing(filepath: str, word: str) -> list[str]:
+    """Return all sentences in filepath that contain word (case-insensitive)."""
+    ext = Path(filepath).suffix.lower()
+    try:
+        if ext == ".pdf":
+            import fitz
+            doc = fitz.open(filepath)
+            text = " ".join(page.get_text("text") for page in doc)
+            doc.close()
+        elif ext == ".docx":
+            from docx import Document
+            doc = Document(filepath)
+            text = "\n".join(p.text for p in doc.paragraphs)
+        else:
+            text = Path(filepath).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+
+    # Flatten whitespace so sentences aren't broken by line wraps
+    text = re.sub(r'\s+', ' ', text)
+
+    parts = re.split(r'(?<=[.!?])\s+', text)
+    w = word.lower()
+    return [s.strip() for s in parts if s.strip() and w in s.lower()]

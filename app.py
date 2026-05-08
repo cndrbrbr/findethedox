@@ -93,6 +93,24 @@ class _SearchWorker(QThread):
             self.error.emit(str(exc))
 
 
+class _SentenceWorker(QThread):
+    """Extracts sentences containing the search word from a document file."""
+    ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, filepath: str, word: str):
+        super().__init__()
+        self._filepath = filepath
+        self._word = word
+
+    def run(self):
+        try:
+            from doc_viewer import sentences_containing
+            self.ready.emit(sentences_containing(self._filepath, self._word))
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
 # ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
@@ -116,6 +134,8 @@ class MainWindow(QMainWindow):
         self._cache_conn  = None                           # set after cache is ready
         self._current_word: str = ""
         self._search_worker: _SearchWorker | None = None
+        self._sentence_worker: _SentenceWorker | None = None
+        self._sent_ever_shown: bool = False
 
         self._build_ui()
         self._build_menu()
@@ -159,31 +179,62 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(clouds_row)
 
         right = QWidget()
-        right.setFixedWidth(320)
         right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 4, 0)
         right_layout.setSpacing(4)
+
+        # --- document list section ---
+        doc_widget = QWidget()
+        doc_layout = QVBoxLayout(doc_widget)
+        doc_layout.setContentsMargins(0, 0, 0, 0)
+        doc_layout.setSpacing(4)
 
         self._doc_title = QLabel("Documents")
         self._doc_title.setStyleSheet("font-weight:bold;font-size:13px;")
-        right_layout.addWidget(self._doc_title)
+        doc_layout.addWidget(self._doc_title)
 
         self._doc_list = QListWidget()
         self._doc_list.itemDoubleClicked.connect(self._on_doc_clicked)
-        right_layout.addWidget(self._doc_list)
+        self._doc_list.itemClicked.connect(self._on_doc_selected)
+        doc_layout.addWidget(self._doc_list)
 
-        hint = QLabel("Double-click to open")
+        hint = QLabel("Click: sentences  ·  Double-click: open")
         hint.setStyleSheet("color:#888;font-size:10px;")
-        right_layout.addWidget(hint)
+        doc_layout.addWidget(hint)
+
+        # --- sentence list section ---
+        self._sent_widget = QWidget()
+        sent_layout = QVBoxLayout(self._sent_widget)
+        sent_layout.setContentsMargins(0, 0, 0, 0)
+        sent_layout.setSpacing(4)
+
+        self._sent_title = QLabel("Sentences")
+        self._sent_title.setStyleSheet("font-weight:bold;font-size:13px;")
+        sent_layout.addWidget(self._sent_title)
+
+        self._sent_list = QListWidget()
+        self._sent_list.setWordWrap(True)
+        sent_layout.addWidget(self._sent_list)
+
+        self._sent_widget.setVisible(False)
+
+        # inner splitter: doc list | sentence list
+        self._inner_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._inner_splitter.addWidget(doc_widget)
+        self._inner_splitter.addWidget(self._sent_widget)
+        self._inner_splitter.setStretchFactor(0, 0)
+        self._inner_splitter.setStretchFactor(1, 1)
+        right_layout.addWidget(self._inner_splitter)
 
         self._right_panel = right
         self._right_panel.setVisible(False)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-        root.addWidget(splitter)
+        self._outer_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._outer_splitter.addWidget(left)
+        self._outer_splitter.addWidget(right)
+        self._outer_splitter.setStretchFactor(0, 1)
+        self._outer_splitter.setStretchFactor(1, 0)
+        root.addWidget(self._outer_splitter)
 
         self._status = QStatusBar()
         self.setStatusBar(self._status)
@@ -419,7 +470,57 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.ItemDataRole.UserRole, occ)
                 self._doc_list.addItem(item)
         self._doc_title.setText(f'"{word}" in {self._doc_list.count()} document(s)')
-        self._right_panel.setVisible(True)
+
+        # Reset sentence panel for the new search
+        self._sent_list.clear()
+        self._sent_title.setText("Sentences")
+        self._sent_widget.setVisible(False)
+
+        if not self._right_panel.isVisible():
+            self._right_panel.setVisible(True)
+            total = self._outer_splitter.width()
+            self._outer_splitter.setSizes([total - 320, 320])
+
+    def _on_doc_selected(self, item: QListWidgetItem):
+        """Single-click on a document: show matching sentences in the right panel."""
+        occ: query.DocOccurrence = item.data(Qt.ItemDataRole.UserRole)
+        filepath = Path(occ.folderpath) / occ.filename
+        if not filepath.exists() and self._docs_folder:
+            filepath = Path(self._docs_folder) / occ.filename
+
+        self._sent_list.clear()
+
+        if not filepath.exists():
+            self._sent_title.setText("File not found")
+            self._sent_widget.setVisible(True)
+            return
+
+        self._sent_title.setText(f'Loading sentences…')
+
+        if not self._sent_widget.isVisible():
+            self._sent_widget.setVisible(True)
+            if not self._sent_ever_shown:
+                self._sent_ever_shown = True
+                total = self._outer_splitter.width()
+                right_target = min(660, max(400, total - 600))
+                self._outer_splitter.setSizes([total - right_target, right_target])
+                self._inner_splitter.setSizes([280, right_target - 280])
+
+        self._sentence_worker = _SentenceWorker(str(filepath), self._current_word)
+        self._sentence_worker.ready.connect(self._on_sentences_ready)
+        self._sentence_worker.error.connect(
+            lambda msg: self._sent_title.setText(f"Error: {msg}")
+        )
+        self._sentence_worker.start()
+
+    def _on_sentences_ready(self, sentences: list):
+        self._sent_list.clear()
+        self._sent_title.setText(
+            f'"{self._current_word}" — {len(sentences)} sentence(s)'
+        )
+        for s in sentences:
+            display = s if len(s) <= 300 else s[:300] + "…"
+            self._sent_list.addItem(display)
 
     def _update_clouds(self, words: list[query.WordScore]):
         for cw in self._clouds.values():
