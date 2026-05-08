@@ -256,9 +256,9 @@ class MainWindow(QMainWindow):
 
     def _update_title(self):
         if len(self._db_paths) == 1:
-            self.setWindowTitle(f"findethedox — {Path(self._db_paths[0]).name}")
+            self.setWindowTitle(f"findethedox by cndrbrbr — {Path(self._db_paths[0]).name}")
         else:
-            self.setWindowTitle(f"findethedox — {len(self._db_paths)} databases")
+            self.setWindowTitle(f"findethedox by cndrbrbr — {len(self._db_paths)} databases")
 
     def _build_menu(self):
         file_menu = self.menuBar().addMenu("File")
