@@ -66,7 +66,7 @@ and only happens once — subsequent launches are instant.
 
 ## Interface overview
 
-![findethedox screenshot](Screenshot%202026-05-02%20001052.png)
+![findethedox screenshot](Screenshot_3.png)
 
 ```
 ┌─────────────────────────────────────────────────────────┬──────────────┐
