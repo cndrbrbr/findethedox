@@ -68,6 +68,39 @@ and only happens once — subsequent launches are instant.
 
 ![findethedox screenshot](Screenshot_3.png)
 
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph src["Source databases (one or more)"]
+        d1[("allmydox_1.db")]
+        d2[("allmydox_2.db")]
+        dN[("allmydox_N.db")]
+    end
+
+    subgraph build["cache.py — built once, incremental updates per source"]
+        c[("cache.db\n───────────────\ncooccurrence\nword_freq\nmeta")]
+    end
+
+    subgraph ftd["findethedox"]
+        wc["Word clouds\nNames · Nouns · Verbs"]
+        dl["Document list"]
+        sl["Sentence panel"]
+    end
+
+    f[("Document files\n.pdf · .docx · .txt")]
+
+    src -- "ATTACH / aggregate\n(23 SQL steps per source)" --> build
+    build -- "co-occurrence scores\nglobal word frequencies" --> wc
+    src -- "document occurrences" --> dl
+    dl --> sl
+    f -- "sentence extraction" --> sl
+```
+
+---
+
 ```
 ┌─────────────────────────────────────────────────────────┬──────────────┐
 │  Search: [ type a word and press Enter ______________ ] │              │
