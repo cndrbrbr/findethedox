@@ -214,6 +214,9 @@ class MainWindow(QMainWindow):
 
         self._sent_list = QListWidget()
         self._sent_list.setWordWrap(True)
+        self._sent_list.setStyleSheet(
+            "QListWidget::item { border-bottom: 1px solid #333; padding: 4px 2px; }"
+        )
         sent_layout.addWidget(self._sent_list)
 
         self._sent_widget.setVisible(False)
