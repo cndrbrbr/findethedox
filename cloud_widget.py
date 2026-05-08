@@ -11,7 +11,7 @@ import matplotlib.font_manager as fm
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.patches import FancyBboxPatch
 from wordcloud import WordCloud
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QSizePolicy
 
 from query import WordScore
@@ -57,6 +57,10 @@ class CloudWidget(QWidget):
         self._on_left = on_left_click
         self._on_right = on_right_click
         self._word_boxes: list[tuple[str, float, float, float, float]] = []
+        self._last_words: list[WordScore] = []
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.timeout.connect(self._on_resize_timeout)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -80,8 +84,17 @@ class CloudWidget(QWidget):
         self._canvas.mpl_connect("button_press_event", self._on_click)
         layout.addWidget(self._canvas)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._last_words:
+            self._resize_timer.start(150)
+
+    def _on_resize_timeout(self):
+        self.update_words(self._last_words)
+
     def update_words(self, words: list[WordScore]):
         """Render a new set of words. Pass empty list to clear."""
+        self._last_words = words
         self._ax.cla()
         self._ax.set_facecolor("#1e1e1e")
         self._ax.axis("off")
@@ -92,14 +105,22 @@ class CloudWidget(QWidget):
             self._canvas.draw()
             return
 
+        w = max(200, self._canvas.width())
+        h = max(120, self._canvas.height())
+        max_words = max(10, min(250, (w * h) // 3000))
+
+        # Update figure size to match canvas so font sizes stay proportional
+        dpi = self._fig.dpi
+        self._fig.set_size_inches(w / dpi, h / dpi, forward=False)
+
         wc = WordCloud(
             font_path=_FONT_PATH,
             background_color=None,
             mode="RGBA",
             color_func=lambda *a, **kw: _COLOURS[self.kind],
-            max_words=80,
-            width=600,
-            height=360,
+            max_words=max_words,
+            width=w,
+            height=h,
             prefer_horizontal=0.85,
         ).generate_from_frequencies(freqs)
 
