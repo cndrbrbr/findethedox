@@ -503,3 +503,54 @@ sentences easier to distinguish at a glance. Each item now has a subtle
 | File | Change |
 |---|---|
 | `app.py` | Added `border-bottom` separator styling to `_sent_list` |
+
+---
+
+## v2.0 — 2026-05-08  Multi-database support
+
+findethedox can now combine multiple allmydox databases into a single
+unified cache and search across all of them simultaneously.
+
+### Usage
+
+```bash
+python3 main.py /path/to/first.db /path/to/second.db
+```
+
+Or use the new **File > Add Database…** (`Ctrl+Shift+O`) to append a
+source to the current session without losing the existing cache.
+
+### Cache build
+
+Each source database is ATTACHed to the cache in sequence. All 23
+co-occurrence aggregation steps run against it, then it is DETACHed
+before the next source starts. The raw staging tables are consolidated
+into the shared `cooccurrence` and `word_freq` tables in a single
+`GROUP BY … SUM` pass at the end.
+
+### Per-source watermarks
+
+Each source has its own `max_file_id` watermark stored in the `meta`
+table under the key `src:<path>`. Incremental rebuilds via the toolbar
+button only reprocess the specific source databases that have new
+documents.
+
+### Document search
+
+`_SearchWorker` queries every source database for document occurrences
+and deduplicates results across sources before populating the document
+panel.
+
+### Backward compatibility
+
+Existing single-database configurations, saved settings, and old cache
+files continue to work without any changes. The config reader accepts
+both the new `db_paths` list and the legacy `db_path` string.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `cache.py` | `build`/`update`/`needs_update` accept `list[str]`; ATTACH/DETACH loop per source; per-source watermarks; `freq_raw` staging table for clean multi-source aggregation |
+| `app.py` | All workers accept `db_paths` list; `_SearchWorker` merges and deduplicates results across sources; `MainWindow` accepts list; **Add Database…** menu item; title shows DB name or count |
+| `main.py` | `db` argument changed to `nargs="*"`; config supports both new `db_paths` list and legacy `db_path` string |
