@@ -432,3 +432,74 @@ resizing has settled, not on every pixel of a drag.
 | File | Change |
 |---|---|
 | `cloud_widget.py` | `resizeEvent` + `QTimer` debounce; `_last_words` cache for re-render; dynamic `max_words`, `width`, `height`; `set_size_inches` sync |
+
+---
+
+## v1.7 — 2026-05-08  Launch scripts
+
+Added one-click launch scripts for both platforms.
+
+| File | Platform | Usage |
+|---|---|---|
+| `start.sh` | Linux | `./start.sh` or `./start.sh /path/to/allmydox.db` |
+| `start.bat` | Windows | Double-click or run from the command prompt |
+
+Both scripts change to their own directory automatically so they work
+correctly regardless of where they are called from. Any arguments are
+passed through to `main.py`.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `start.sh` | New Linux launch script |
+| `start.bat` | New Windows launch script |
+
+---
+
+## v1.8 — 2026-05-08  Sentence panel
+
+Single-clicking a document in the document list now opens a sentence panel
+to its right, showing all sentences from that document that contain the
+current search term.
+
+### Features
+
+**Click to preview**  
+Single-click any document in the list to see its matching sentences.
+Double-click still opens the full document viewer as before.
+
+**All file types**  
+Sentences are extracted from PDF (via pymupdf), DOCX, and plain text files.
+The full document text is flattened to a single line before splitting so
+sentences broken across line wraps are returned intact.
+
+**Non-blocking**  
+Extraction runs in a `_SentenceWorker` background thread so the UI stays
+responsive while large files are read.
+
+**Adaptive layout**  
+The sentence panel appears alongside the document list on first use. The
+inner splitter adjusts automatically and can be dragged to any proportion.
+The panel resets and hides whenever a new search is performed.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `doc_viewer.py` | New `sentences_containing(filepath, word)` function |
+| `app.py` | `_SentenceWorker`; `_on_doc_selected`; `_on_sentences_ready`; inner splitter for doc/sentence layout |
+
+---
+
+## v1.9 — 2026-05-08  Sentence separator lines
+
+Thin separator lines between items in the sentence panel make individual
+sentences easier to distinguish at a glance. Each item now has a subtle
+`#333` bottom border with a small vertical padding, applied via stylesheet.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `app.py` | Added `border-bottom` separator styling to `_sent_list` |
