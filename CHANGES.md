@@ -386,3 +386,49 @@ completes in < 5 ms.
 | File | Change |
 |---|---|
 | `app.py` | Added `_SearchWorker`; replaced synchronous search methods with `_start_search()`, `_on_cooc_ready()`, `_on_docs_ready()`; removed `WaitCursor` blocks from search path |
+
+---
+
+## v1.6 — 2026-05-08  Resize-aware word clouds
+
+### Problem
+
+The word clouds were generated at a fixed 600 × 360 pixel grid with a hard-coded
+limit of 80 words. Resizing the window stretched or shrunk the existing rendering
+without adding or removing any content.
+
+### Solution
+
+`CloudWidget` now re-renders each cloud whenever its canvas size changes.
+
+**Dynamic word count**
+
+`max_words` is derived from the current canvas area:
+
+```
+max_words = clamp(w × h ÷ 3000, 10, 250)
+```
+
+At a typical 400 × 300 canvas that yields ~40 words; at 900 × 550 it yields ~165.
+
+**Pixel-accurate layout**
+
+`WordCloud` receives the actual canvas pixel dimensions (`width=w, height=h`) so
+word positions and font sizes are computed for the space that is actually available.
+
+**Proportional font sizes**
+
+The matplotlib figure size is updated to match the canvas before each render
+(`fig.set_size_inches(w / dpi, h / dpi)`), keeping the point-to-pixel ratio
+constant so words appear the same visual weight at any window size.
+
+**150 ms debounce**
+
+`resizeEvent` starts a single-shot `QTimer`. The cloud only regenerates once
+resizing has settled, not on every pixel of a drag.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `cloud_widget.py` | `resizeEvent` + `QTimer` debounce; `_last_words` cache for re-render; dynamic `max_words`, `width`, `height`; `set_size_inches` sync |
