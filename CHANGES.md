@@ -554,3 +554,87 @@ both the new `db_paths` list and the legacy `db_path` string.
 | `cache.py` | `build`/`update`/`needs_update` accept `list[str]`; ATTACH/DETACH loop per source; per-source watermarks; `freq_raw` staging table for clean multi-source aggregation |
 | `app.py` | All workers accept `db_paths` list; `_SearchWorker` merges and deduplicates results across sources; `MainWindow` accepts list; **Add Database…** menu item; title shows DB name or count |
 | `main.py` | `db` argument changed to `nargs="*"`; config supports both new `db_paths` list and legacy `db_path` string |
+
+---
+
+## v2.1 — 2026-05-11  Databases & Cache dialog
+
+### Problem
+
+The cache was never automatically updated when a new database was added
+to an existing session. The only remedy was the **Rebuild Cache** toolbar
+button, which triggered a full rebuild from scratch. There was also no
+single place to see which databases were loaded, whether each was
+included in the cache, or to choose where the cache lived.
+
+### Solution — `SetupDialog`
+
+A new `SetupDialog` class (in `app.py`) replaces the old **Add Database…**
+menu item with **File > Databases & Cache…** (`Ctrl+Shift+O`). The dialog
+provides:
+
+**Cache folder selection**  
+The user picks a folder; the cache file is always named
+`findethedox.cache.db` inside that folder. The full derived path is shown
+below the folder field so the location is unambiguous. The chosen folder
+is saved to config under the key `cache_folder`.
+
+**Database list with status icons**  
+Each source database appears in the list with a colour-coded icon:
+
+| Icon | Meaning |
+|---|---|
+| ✓ green | In cache, up to date |
+| ⚠ yellow | In cache, but new documents exist in the source since the last build |
+| ✗ red | Not in the cache at all |
+| — grey | Cache file does not exist yet |
+
+Status is computed per-database by reading the per-source watermark from
+the cache's `meta` table (`src:<path>`) and comparing it with
+`MAX(fileID)` in the source database. This reuses the same logic that
+`cache.needs_update()` applies, but applied individually so each source
+can be shown separately.
+
+**Add / Remove databases**  
+The **Add Database…** button opens a file picker; the new entry appears
+immediately with its status icon. **Remove Selected** removes highlighted
+entries.
+
+**Build / Update Cache button**  
+The button label adapts to the situation:
+- *Build Cache* — no cache file exists yet
+- *Update Cache* — cache exists but one or more sources are missing or outdated
+- Disabled — all sources are current
+
+The operation runs in a `_CacheWorker` background thread (reusing the
+existing worker). After completion the list refreshes to show updated
+status icons. For a brand-new source database (no watermark), `cache.update()`
+treats `last_file_id = 0` so all its documents are ingested without a full
+rebuild of existing data.
+
+**Apply**  
+Saves `db_paths`, `cache_path`, `cache_folder`, and `docs_folder` to
+config, closes the current `MainWindow`, and opens a new one with the
+updated configuration.
+
+### Decision: fixed cache filename
+
+The cache file is always named `findethedox.cache.db`. This simplifies the
+dialog to a single folder picker instead of a file picker and makes the cache
+easy to find. The trade-off is that users with an existing cache at a different
+name will see the cache as "not built" the first time they open the dialog and
+need to rebuild it once. Since the dialog makes rebuilding straightforward,
+this was accepted.
+
+### Decision: replace, not add
+
+The old **Add Database…** and **Set Cache File…** items were removed rather
+than kept alongside the new dialog. Both functions are fully covered by the
+dialog, and having three separate entry points for related tasks would be
+confusing.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `app.py` | New `SetupDialog` class; `_cache_db_status()` helper; `_STATUS_DISPLAY` dict; replaced **Add Database…** / **Set Cache File…** with **Databases & Cache…**; `_on_setup_dialog()` on `MainWindow`; removed dead `_on_add_database()` and `_on_set_cache_path()` |
