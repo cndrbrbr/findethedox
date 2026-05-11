@@ -638,3 +638,23 @@ confusing.
 | File | Change |
 |---|---|
 | `app.py` | New `SetupDialog` class; `_cache_db_status()` helper; `_STATUS_DISPLAY` dict; replaced **Add Database…** / **Set Cache File…** with **Databases & Cache…**; `_on_setup_dialog()` on `MainWindow`; removed dead `_on_add_database()` and `_on_set_cache_path()` |
+
+---
+
+## v2.2 — 2026-05-11  Documentation and Mermaid diagrams
+
+Added three new documentation files and updated the existing ones to reflect
+the current state of the application.
+
+| File | Content |
+|---|---|
+| `features.md` | Full user-facing feature list |
+| `architecture.md` | Module overview, cache internals, worker threads, startup sequence, query flow |
+| `README.md` | Rewritten as a user manual covering the current UI |
+| `CHANGES.md` | v2.1 entry added |
+
+The Mermaid flowchart diagram that was originally in `README.md` had been
+replaced with ASCII art during documentation authoring. It was restored to
+both `README.md` (after the screenshot) and `architecture.md` (Overview
+section). The diagram shows the data flow from source databases through the
+cache to the UI, and from document files to the sentence panel and viewer.
