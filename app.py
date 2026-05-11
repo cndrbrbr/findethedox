@@ -1,13 +1,17 @@
 """Main application window for findethedox."""
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
+    QApplication, QDialog, QDialogButtonBox, QMainWindow, QWidget,
+    QHBoxLayout, QVBoxLayout,
     QLineEdit, QLabel, QListWidget, QListWidgetItem,
     QSplitter, QStatusBar, QProgressDialog, QFileDialog, QMessageBox,
+    QPushButton,
 )
 
 import cache as cache_mod
@@ -15,6 +19,40 @@ import config as config_mod
 import query
 from cloud_widget import CloudWidget
 from doc_viewer import DocViewerDialog
+
+_CACHE_FILENAME = "findethedox.cache.db"
+
+# Status of one source database relative to the cache file
+_STATUS_DISPLAY = {
+    "current":  ("✓", "#4ec94e"),   # green  — in cache, up to date
+    "outdated": ("⚠", "#e5c07b"),   # yellow — in cache, new docs available
+    "missing":  ("✗", "#e06c75"),   # red    — not in cache at all
+    "no_cache": ("—", "#888888"),   # grey   — cache file doesn't exist yet
+}
+
+
+def _cache_db_status(cache_path: str, db_path: str) -> str:
+    if not Path(cache_path).exists():
+        return "no_cache"
+    try:
+        cc = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
+        row = cc.execute(
+            "SELECT value FROM meta WHERE key=?", (f"src:{db_path}",)
+        ).fetchone()
+        cc.close()
+        if row is None:
+            return "missing"
+        last = int(row[0])
+    except Exception:
+        return "missing"
+    try:
+        sc = sqlite3.connect(db_path)
+        row = sc.execute("SELECT MAX(fileID) FROM documents").fetchone()
+        sc.close()
+        cur = int(row[0]) if row and row[0] else 0
+    except Exception:
+        return "missing"
+    return "outdated" if cur > last else "current"
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +158,242 @@ class _SentenceWorker(QThread):
             self.ready.emit(sentences_containing(self._filepath, self._word))
         except Exception as exc:
             self.error.emit(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Setup dialog — databases & cache
+# ---------------------------------------------------------------------------
+
+class SetupDialog(QDialog):
+    """Select cache folder, manage databases, and build/update the cache."""
+
+    def __init__(self, db_paths: list[str], cache_folder: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Databases & Cache")
+        self.resize(700, 440)
+
+        self._db_paths: list[str] = list(db_paths)
+        self._cache_folder: str = cache_folder
+        self._worker: _CacheWorker | None = None
+
+        self._build_ui()
+        self._apply_dark_theme()
+        self._refresh()
+
+    # ------------------------------------------------------------------
+    # Public accessors
+
+    def result_db_paths(self) -> list[str]:
+        return list(self._db_paths)
+
+    def result_cache_path(self) -> str:
+        return str(Path(self._cache_folder) / _CACHE_FILENAME)
+
+    def result_cache_folder(self) -> str:
+        return self._cache_folder
+
+    # ------------------------------------------------------------------
+    # UI
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+        root.setContentsMargins(16, 16, 16, 16)
+
+        # Cache folder row
+        cache_row = QHBoxLayout()
+        cache_row.addWidget(QLabel("Cache folder:"))
+        self._cache_edit = QLineEdit()
+        self._cache_edit.setReadOnly(True)
+        cache_row.addWidget(self._cache_edit, 1)
+        btn_browse = QPushButton("Browse…")
+        btn_browse.clicked.connect(self._on_browse_cache)
+        cache_row.addWidget(btn_browse)
+        root.addLayout(cache_row)
+
+        self._cache_file_lbl = QLabel()
+        self._cache_file_lbl.setStyleSheet("color:#888;font-size:11px;margin-left:2px;")
+        root.addWidget(self._cache_file_lbl)
+
+        # Databases header
+        db_hdr = QHBoxLayout()
+        db_hdr.addWidget(QLabel("Databases:"))
+        db_hdr.addStretch()
+        self._add_btn = QPushButton("Add Database…")
+        self._add_btn.clicked.connect(self._on_add_database)
+        db_hdr.addWidget(self._add_btn)
+        root.addLayout(db_hdr)
+
+        # Database list
+        self._db_list = QListWidget()
+        self._db_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        root.addWidget(self._db_list, 1)
+
+        # Remove row
+        remove_row = QHBoxLayout()
+        remove_row.addStretch()
+        self._remove_btn = QPushButton("Remove Selected")
+        self._remove_btn.clicked.connect(self._on_remove)
+        remove_row.addWidget(self._remove_btn)
+        root.addLayout(remove_row)
+
+        # Status + cache update
+        status_row = QHBoxLayout()
+        self._status_lbl = QLabel()
+        status_row.addWidget(self._status_lbl, 1)
+        self._update_btn = QPushButton("Build Cache")
+        self._update_btn.clicked.connect(self._on_update_cache)
+        status_row.addWidget(self._update_btn)
+        root.addLayout(status_row)
+
+        # OK / Cancel
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Apply
+        )
+        self._apply_btn = btns.button(QDialogButtonBox.StandardButton.Apply)
+        btns.clicked.connect(
+            lambda b: self.accept() if b is self._apply_btn else self.reject()
+        )
+        root.addWidget(btns)
+
+    def _apply_dark_theme(self):
+        self.setStyleSheet("""
+            QDialog, QWidget { background:#1e1e1e; color:#d4d4d4; }
+            QLabel { color:#d4d4d4; }
+            QLineEdit {
+                background:#2d2d2d; border:1px solid #555;
+                border-radius:4px; padding:4px 8px; color:#d4d4d4;
+            }
+            QListWidget {
+                background:#2d2d2d; border:1px solid #444; color:#d4d4d4;
+            }
+            QListWidget::item { padding:3px 6px; }
+            QListWidget::item:hover    { background:#3a3a3a; }
+            QListWidget::item:selected { background:#264f78; color:#d4d4d4; }
+            QPushButton {
+                background:#2d2d2d; border:1px solid #555;
+                border-radius:4px; padding:4px 12px; color:#d4d4d4;
+            }
+            QPushButton:hover    { background:#3a3a3a; }
+            QPushButton:disabled { color:#666; border-color:#3a3a3a; }
+        """)
+
+    # ------------------------------------------------------------------
+    # State
+
+    def _refresh(self):
+        cp = self.result_cache_path()
+        self._cache_edit.setText(self._cache_folder)
+        self._cache_file_lbl.setText(f"  {cp}")
+        self._db_list.clear()
+
+        statuses: list[str] = []
+        for db_path in self._db_paths:
+            status = _cache_db_status(cp, db_path)
+            statuses.append(status)
+            icon, color = _STATUS_DISPLAY[status]
+            item = QListWidgetItem(f"  {icon}  {db_path}")
+            item.setForeground(QColor(color))
+            item.setData(Qt.ItemDataRole.UserRole, db_path)
+            self._db_list.addItem(item)
+
+        no_dbs      = not self._db_paths
+        no_cache    = any(s == "no_cache"  for s in statuses)
+        has_missing = any(s == "missing"   for s in statuses)
+        has_old     = any(s == "outdated"  for s in statuses)
+
+        if no_dbs:
+            self._status_lbl.setText("No databases selected.")
+            self._update_btn.setEnabled(False)
+            self._update_btn.setText("Build Cache")
+        elif no_cache:
+            self._status_lbl.setText("Cache not built yet.")
+            self._update_btn.setEnabled(True)
+            self._update_btn.setText("Build Cache")
+        elif has_missing or has_old:
+            n_ok = statuses.count("current")
+            self._status_lbl.setText(
+                f"{n_ok} of {len(statuses)} database(s) up to date in cache."
+            )
+            self._update_btn.setEnabled(True)
+            self._update_btn.setText("Update Cache")
+        else:
+            self._status_lbl.setText(
+                f"All {len(statuses)} database(s) up to date in cache."
+            )
+            self._update_btn.setEnabled(False)
+            self._update_btn.setText("Update Cache")
+
+        self._apply_btn.setEnabled(not no_dbs)
+        self._remove_btn.setEnabled(not no_dbs)
+
+    # ------------------------------------------------------------------
+    # Actions
+
+    def _on_browse_cache(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Cache Folder", self._cache_folder
+        )
+        if folder:
+            self._cache_folder = folder
+            self._refresh()
+
+    def _on_add_database(self):
+        start = (
+            str(Path(self._db_paths[-1]).parent)
+            if self._db_paths else str(Path.home())
+        )
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Add allmydox Database", start,
+            "SQLite databases (*.db);;All files (*)",
+        )
+        if chosen and chosen not in self._db_paths:
+            self._db_paths.append(chosen)
+            self._refresh()
+
+    def _on_remove(self):
+        to_remove = {
+            item.data(Qt.ItemDataRole.UserRole)
+            for item in self._db_list.selectedItems()
+        }
+        self._db_paths = [p for p in self._db_paths if p not in to_remove]
+        self._refresh()
+
+    def _on_update_cache(self):
+        cp = self.result_cache_path()
+        mode = "update" if Path(cp).exists() else "build"
+
+        dlg = QProgressDialog("Preparing…", None, 0, 100, self)
+        dlg.setWindowTitle("findethedox — Building cache")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumWidth(520)
+        dlg.setValue(0)
+        dlg.show()
+
+        self._update_btn.setEnabled(False)
+        self._add_btn.setEnabled(False)
+
+        self._worker = _CacheWorker(self._db_paths, cp, mode)
+
+        def on_progress(lbl: str, cur: int, tot: int):
+            dlg.setLabelText(f"Step {cur}/{tot}: {lbl}")
+            dlg.setValue(int(cur / tot * 100) if tot else 0)
+
+        def on_done():
+            dlg.close()
+            self._add_btn.setEnabled(True)
+            self._refresh()
+
+        def on_error(msg: str):
+            dlg.close()
+            self._add_btn.setEnabled(True)
+            self._refresh()
+            QMessageBox.critical(self, "Cache Error", f"Cache operation failed:\n{msg}")
+
+        self._worker.progress.connect(on_progress)
+        self._worker.done.connect(on_done)
+        self._worker.error.connect(on_error)
+        self._worker.start()
 
 
 # ---------------------------------------------------------------------------
@@ -267,17 +541,14 @@ class MainWindow(QMainWindow):
         open_db.setShortcut("Ctrl+O")
         open_db.triggered.connect(self._on_open_database)
 
-        add_db = file_menu.addAction("Add Database…")
-        add_db.setShortcut("Ctrl+Shift+O")
-        add_db.triggered.connect(self._on_add_database)
+        setup_db = file_menu.addAction("Databases && Cache…")
+        setup_db.setShortcut("Ctrl+Shift+O")
+        setup_db.triggered.connect(self._on_setup_dialog)
 
         settings_menu = self.menuBar().addMenu("Settings")
 
         set_docs = settings_menu.addAction("Set Documents Folder…")
         set_docs.triggered.connect(self._on_set_docs_folder)
-
-        set_cache = settings_menu.addAction("Set Cache File…")
-        set_cache.triggered.connect(self._on_set_cache_path)
 
         toolbar = self.addToolBar("Tools")
         toolbar.setMovable(False)
@@ -326,18 +597,24 @@ class MainWindow(QMainWindow):
         new_win.show()
         self.close()
 
-    def _on_add_database(self):
-        chosen, _ = QFileDialog.getOpenFileName(
-            self, "Add allmydox database", str(Path(self._db_paths[-1]).parent),
-            "SQLite databases (*.db);;All files (*)",
-        )
-        if not chosen or chosen in self._db_paths:
+    def _on_setup_dialog(self):
+        cache_folder = str(Path(self._cache_path).parent)
+        dlg = SetupDialog(self._db_paths, cache_folder, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        new_win = MainWindow(
-            self._db_paths + [chosen],
-            docs_folder=self._docs_folder,
-            cache_path=self._cache_path,
-        )
+        new_db_paths  = dlg.result_db_paths()
+        new_cache_path = dlg.result_cache_path()
+        if self._cache_conn:
+            self._cache_conn.close()
+            self._cache_conn = None
+        cfg = config_mod.load()
+        cfg["db_paths"]     = new_db_paths
+        cfg["cache_path"]   = new_cache_path
+        cfg["cache_folder"] = dlg.result_cache_folder()
+        cfg["docs_folder"]  = self._docs_folder
+        config_mod.save(cfg)
+        new_win = MainWindow(new_db_paths, docs_folder=self._docs_folder,
+                             cache_path=new_cache_path)
         new_win.show()
         self.close()
 
@@ -348,16 +625,6 @@ class MainWindow(QMainWindow):
             self._docs_folder = folder
             self._save_config()
             self._status.showMessage(f"Documents folder: {folder}", 5000)
-
-    def _on_set_cache_path(self):
-        chosen, _ = QFileDialog.getSaveFileName(
-            self, "Set Cache File Location", self._cache_path,
-            "SQLite databases (*.db);;All files (*)",
-        )
-        if chosen:
-            self._cache_path = chosen
-            self._save_config()
-            self._status.showMessage(f"Cache path: {chosen}", 5000)
 
     def _on_rebuild_cache(self):
         reply = QMessageBox.question(
