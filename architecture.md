@@ -11,19 +11,31 @@ findethedox has three conceptual layers:
 3. **UI** — a PyQt6 main window with three interactive word clouds, a document
    panel, a sentence panel, and a built-in document viewer.
 
-```
-Source databases          Cache                      UI
-─────────────────         ──────────────────────     ──────────────────────
-allmydox_1.db  ──┐        findethedox.cache.db        Word clouds
-allmydox_2.db  ──┼──────► cooccurrence          ───► (Names / Nouns / Verbs)
-allmydox_N.db  ──┘        word_freq
-                          meta (watermarks)
-allmydox_1.db  ──┐
-allmydox_2.db  ──┼──────────────────────────────────► Document list
-allmydox_N.db  ──┘  (document occurrences, live)
+```mermaid
+flowchart LR
+    subgraph src["Source databases (one or more)"]
+        d1[("allmydox_1.db")]
+        d2[("allmydox_2.db")]
+        dN[("allmydox_N.db")]
+    end
 
-Document files ──────────────────────────────────────► Sentence panel
-(.pdf/.docx/.txt)                                       Document viewer
+    subgraph build["cache.py — built once, incremental updates per source"]
+        c[("findethedox.cache.db\n───────────────\ncooccurrence\nword_freq\nmeta")]
+    end
+
+    subgraph ftd["findethedox"]
+        wc["Word clouds\nNames · Nouns · Verbs"]
+        dl["Document list"]
+        sl["Sentence panel"]
+    end
+
+    f[("Document files\n.pdf · .docx · .txt")]
+
+    src -- "ATTACH / aggregate\n(23 SQL steps per source)" --> build
+    build -- "co-occurrence scores\nglobal word frequencies" --> wc
+    src -- "document occurrences" --> dl
+    dl --> sl
+    f -- "sentence extraction" --> sl
 ```
 
 ---
