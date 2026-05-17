@@ -641,6 +641,34 @@ confusing.
 
 ---
 
+## v2.5 — 2026-05-17  Auto-detect legacy cache on database add
+
+### Problem
+
+When the Settings dialog opened with no databases configured (first launch),
+the default cache path was set to `<folder>/findethedox.cache.db`. If the user
+then added a database that already had a cache built under the old naming
+convention (e.g. `sv25.cache.db` next to `sv25.db`), the dialog did not find
+it and showed "no cache" — even though a valid, complete cache was sitting
+right next to the database file.
+
+### Fix
+
+When a database is added in the Settings dialog and the currently configured
+cache path does not exist on disk, the app now checks for a legacy cache
+at `default_cache_path([chosen_db])` (i.e. `<dbname>.cache.db` in the same
+folder as the database). If found, it is adopted automatically: the cache path
+and cache folder fields update to point at the existing file, and the status
+icons immediately reflect the correct state.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `app.py` | `_on_add_database()` checks for a legacy cache when the current cache path is missing and adopts it if found |
+
+---
+
 ## v2.4 — 2026-05-17  Fix cache status detection
 
 ### Problem
