@@ -641,6 +641,46 @@ confusing.
 
 ---
 
+## v2.8 — 2026-05-17  Fix word clouds shrinking after window resize
+
+### Problem
+
+After making the main window bigger, the three word clouds briefly grew to
+fill the new space, then shrank back to their previous size. Two bugs in
+`CloudWidget.update_words()` caused a feedback loop with Qt's layout engine:
+
+1. **`self._canvas.width()` / `set_size_inches`**: Reading the canvas widget
+   size and then calling `self._fig.set_size_inches(w/dpi, h/dpi, forward=False)`
+   changed the figure's internal bounding box. Qt's layout engine reads the
+   canvas's `sizeHint()` (derived from `figure.bbox`) and uses it to reallocate
+   space. This caused the canvas — and therefore the clouds — to be resized back
+   to the figure's new (smaller) hint.
+
+2. **`self._canvas.draw()`**: The synchronous `draw()` call caused the Qt
+   backend to process pending events immediately. Those events included the
+   layout recalculation triggered by point 1, completing the shrink cycle.
+
+### Fix
+
+- The figure size is no longer read from the canvas widget; instead it is read
+  directly from the figure (`self._fig.get_figwidth() * dpi`). `FigureCanvasQTAgg`
+  already keeps this value in sync with the canvas whenever Qt resizes the widget
+  via its own `resizeEvent`. Reading from the figure avoids any interaction with
+  Qt's layout.
+- `set_size_inches` is no longer called in `update_words` — it was redundant and
+  is now the source of the layout interference.
+- `draw()` is replaced with `draw_idle()` throughout `update_words`. `draw_idle()`
+  schedules the repaint without synchronously processing Qt events, breaking the
+  feedback loop entirely.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `cloud_widget.py` | `update_words()`: read size from figure, remove `set_size_inches`, replace `draw()` with `draw_idle()` |
+
+---
+
 ## v2.7 — 2026-05-17  Per-database documents folder
 
 ### Overview
