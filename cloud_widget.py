@@ -102,16 +102,17 @@ class CloudWidget(QWidget):
 
         freqs = {w.word: max(w.score, 1.0) for w in words if w.kind == self.kind}
         if not freqs:
-            self._canvas.draw()
+            self._canvas.draw_idle()
             return
 
-        w = max(200, self._canvas.width())
-        h = max(120, self._canvas.height())
-        max_words = max(10, min(250, (w * h) // 3000))
-
-        # Update figure size to match canvas so font sizes stay proportional
+        # Read size from the figure itself — FigureCanvasQTAgg.resizeEvent already
+        # keeps this in sync with the canvas widget. Reading from the canvas widget
+        # directly and then calling set_size_inches caused Qt to re-layout and
+        # shrink the canvas back to the figure's previous sizeHint.
         dpi = self._fig.dpi
-        self._fig.set_size_inches(w / dpi, h / dpi, forward=False)
+        w = max(200, int(self._fig.get_figwidth() * dpi))
+        h = max(120, int(self._fig.get_figheight() * dpi))
+        max_words = max(10, min(250, (w * h) // 3000))
 
         wc = WordCloud(
             font_path=_FONT_PATH,
@@ -132,7 +133,7 @@ class CloudWidget(QWidget):
         for (word, _), font_size, (row, col), orient, colour in wc.layout_:
             x, y = col, wc.height - row
             rot = 90 if orient else 0
-            txt = ax.text(
+            ax.text(
                 x, y, word,
                 fontsize=font_size * 0.72,
                 color=colour,
@@ -140,10 +141,11 @@ class CloudWidget(QWidget):
                 va="top" if not rot else "center",
                 ha="left" if not rot else "center",
             )
-            # Store bounding box in data coordinates after draw
             self._word_boxes.append((word, x, y, font_size, rot))
 
-        self._canvas.draw()
+        # draw_idle schedules the repaint without processing Qt events synchronously,
+        # avoiding the layout-recalculation feedback loop that draw() triggered.
+        self._canvas.draw_idle()
 
     def _on_click(self, event):
         if event.inaxes != self._ax or event.xdata is None:
