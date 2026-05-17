@@ -165,15 +165,16 @@ class _SentenceWorker(QThread):
 # ---------------------------------------------------------------------------
 
 class SetupDialog(QDialog):
-    """Select cache folder, manage databases, and build/update the cache."""
+    """Configure databases, cache location, and documents folder in one place."""
 
-    def __init__(self, db_paths: list[str], cache_folder: str, parent=None):
+    def __init__(self, db_paths: list[str], cache_folder: str, docs_folder: str = "", parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Databases & Cache")
-        self.resize(700, 440)
+        self.setWindowTitle("findethedox — Settings")
+        self.resize(700, 540)
 
         self._db_paths: list[str] = list(db_paths)
         self._cache_folder: str = cache_folder
+        self._docs_folder: str = docs_folder
         self._worker: _CacheWorker | None = None
 
         self._build_ui()
@@ -191,6 +192,9 @@ class SetupDialog(QDialog):
 
     def result_cache_folder(self) -> str:
         return self._cache_folder
+
+    def result_docs_folder(self) -> str:
+        return self._docs_folder
 
     # ------------------------------------------------------------------
     # UI
@@ -214,6 +218,18 @@ class SetupDialog(QDialog):
         self._cache_file_lbl = QLabel()
         self._cache_file_lbl.setStyleSheet("color:#888;font-size:11px;margin-left:2px;")
         root.addWidget(self._cache_file_lbl)
+
+        # Documents folder row
+        docs_row = QHBoxLayout()
+        docs_row.addWidget(QLabel("Documents folder:"))
+        self._docs_edit = QLineEdit()
+        self._docs_edit.setReadOnly(True)
+        self._docs_edit.setPlaceholderText("Optional — folder where documents are stored")
+        docs_row.addWidget(self._docs_edit, 1)
+        btn_browse_docs = QPushButton("Browse…")
+        btn_browse_docs.clicked.connect(self._on_browse_docs)
+        docs_row.addWidget(btn_browse_docs)
+        root.addLayout(docs_row)
 
         # Databases header
         db_hdr = QHBoxLayout()
@@ -285,6 +301,7 @@ class SetupDialog(QDialog):
         cp = self.result_cache_path()
         self._cache_edit.setText(self._cache_folder)
         self._cache_file_lbl.setText(f"  {cp}")
+        self._docs_edit.setText(self._docs_folder)
         self._db_list.clear()
 
         statuses: list[str] = []
@@ -337,6 +354,15 @@ class SetupDialog(QDialog):
         if folder:
             self._cache_folder = folder
             self._refresh()
+
+    def _on_browse_docs(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Documents Folder",
+            self._docs_folder or str(Path.home()),
+        )
+        if folder:
+            self._docs_folder = folder
+            self._docs_edit.setText(folder)
 
     def _on_add_database(self):
         start = (
@@ -541,14 +567,9 @@ class MainWindow(QMainWindow):
         open_db.setShortcut("Ctrl+O")
         open_db.triggered.connect(self._on_open_database)
 
-        setup_db = file_menu.addAction("Databases && Cache…")
-        setup_db.setShortcut("Ctrl+Shift+O")
-        setup_db.triggered.connect(self._on_setup_dialog)
-
-        settings_menu = self.menuBar().addMenu("Settings")
-
-        set_docs = settings_menu.addAction("Set Documents Folder…")
-        set_docs.triggered.connect(self._on_set_docs_folder)
+        settings_action = file_menu.addAction("Settings…")
+        settings_action.setShortcut("Ctrl+,")
+        settings_action.triggered.connect(self._on_setup_dialog)
 
         toolbar = self.addToolBar("Tools")
         toolbar.setMovable(False)
@@ -599,11 +620,16 @@ class MainWindow(QMainWindow):
 
     def _on_setup_dialog(self):
         cache_folder = str(Path(self._cache_path).parent)
-        dlg = SetupDialog(self._db_paths, cache_folder, parent=self)
+        dlg = SetupDialog(
+            self._db_paths, cache_folder,
+            docs_folder=self._docs_folder or "",
+            parent=self,
+        )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        new_db_paths  = dlg.result_db_paths()
-        new_cache_path = dlg.result_cache_path()
+        new_db_paths    = dlg.result_db_paths()
+        new_cache_path  = dlg.result_cache_path()
+        new_docs_folder = dlg.result_docs_folder() or None
         if self._cache_conn:
             self._cache_conn.close()
             self._cache_conn = None
@@ -611,20 +637,12 @@ class MainWindow(QMainWindow):
         cfg["db_paths"]     = new_db_paths
         cfg["cache_path"]   = new_cache_path
         cfg["cache_folder"] = dlg.result_cache_folder()
-        cfg["docs_folder"]  = self._docs_folder
+        cfg["docs_folder"]  = new_docs_folder
         config_mod.save(cfg)
-        new_win = MainWindow(new_db_paths, docs_folder=self._docs_folder,
+        new_win = MainWindow(new_db_paths, docs_folder=new_docs_folder,
                              cache_path=new_cache_path)
         new_win.show()
         self.close()
-
-    def _on_set_docs_folder(self):
-        start = self._docs_folder or str(Path(self._db_path).parent)
-        folder = QFileDialog.getExistingDirectory(self, "Select documents folder", start)
-        if folder:
-            self._docs_folder = folder
-            self._save_config()
-            self._status.showMessage(f"Documents folder: {folder}", 5000)
 
     def _on_rebuild_cache(self):
         reply = QMessageBox.question(
