@@ -3,10 +3,10 @@ import argparse
 import sys
 from pathlib import Path
 
-from PyQt6.QtWidgets import QApplication, QFileDialog
+from PyQt6.QtWidgets import QApplication, QDialog
 
 import config as config_mod
-from app import MainWindow
+from app import MainWindow, SetupDialog
 
 
 def main():
@@ -47,17 +47,26 @@ def main():
         default = Path("allmydox.db").resolve()
         if default.exists():
             db_paths = [str(default)]
-        else:
-            chosen, _ = QFileDialog.getOpenFileName(
-                None, "Open allmydox database", str(Path.home()),
-                "SQLite databases (*.db);;All files (*)",
-            )
-            if not chosen:
-                sys.exit(0)
-            db_paths = [chosen]
 
     docs_folder: str | None = args.docs or cfg.get("docs_folder") or None
     cache_path:  str | None = args.cache or cfg.get("cache_path") or None
+
+    if not db_paths:
+        cache_folder = cfg.get("cache_folder") or str(Path.home())
+        dlg = SetupDialog([], cache_folder, docs_folder=docs_folder or "")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            sys.exit(0)
+        db_paths = dlg.result_db_paths()
+        if not db_paths:
+            sys.exit(0)
+        docs_folder = dlg.result_docs_folder() or None
+        cache_path  = dlg.result_cache_path()
+        config_mod.save({
+            "db_paths":     db_paths,
+            "cache_folder": dlg.result_cache_folder(),
+            "cache_path":   cache_path,
+            "docs_folder":  docs_folder,
+        })
 
     window = MainWindow(db_paths, docs_folder=docs_folder, cache_path=cache_path)
     window.show()
