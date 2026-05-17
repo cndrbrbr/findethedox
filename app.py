@@ -455,6 +455,7 @@ class MainWindow(QMainWindow):
         self._search_worker: _SearchWorker | None = None
         self._sentence_worker: _SentenceWorker | None = None
         self._sent_ever_shown: bool = False
+        self._current_filepath: str = ""
 
         self._build_ui()
         self._build_menu()
@@ -537,7 +538,12 @@ class MainWindow(QMainWindow):
         self._sent_list.setStyleSheet(
             "QListWidget::item { border-bottom: 1px solid #333; padding: 4px 2px; }"
         )
+        self._sent_list.itemDoubleClicked.connect(self._on_sentence_double_clicked)
         sent_layout.addWidget(self._sent_list)
+
+        sent_hint = QLabel("Double-click: open document at this sentence")
+        sent_hint.setStyleSheet("color:#888;font-size:10px;")
+        sent_layout.addWidget(sent_hint)
 
         self._sent_widget.setVisible(False)
 
@@ -819,6 +825,7 @@ class MainWindow(QMainWindow):
         if not filepath.exists() and self._docs_folder:
             filepath = Path(self._docs_folder) / occ.filename
 
+        self._current_filepath = str(filepath)
         self._sent_list.clear()
 
         if not filepath.exists():
@@ -849,9 +856,25 @@ class MainWindow(QMainWindow):
         self._sent_title.setText(
             f'"{self._current_word}" — {len(sentences)} sentence(s)'
         )
-        for s in sentences:
+        for s, page in sentences:
             display = s if len(s) <= 300 else s[:300] + "…"
-            self._sent_list.addItem(display)
+            item = QListWidgetItem(display)
+            item.setData(Qt.ItemDataRole.UserRole, (s, page))
+            self._sent_list.addItem(item)
+
+    def _on_sentence_double_clicked(self, item: QListWidgetItem):
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data or not self._current_filepath:
+            return
+        sentence, page = data
+        filepath = self._current_filepath
+        if not Path(filepath).exists():
+            return
+        dlg = DocViewerDialog(
+            filepath, page or 1, self._current_word,
+            sentence=sentence, parent=self,
+        )
+        dlg.exec()
 
     def _update_clouds(self, words: list[query.WordScore]):
         for cw in self._clouds.values():
