@@ -641,6 +641,52 @@ confusing.
 
 ---
 
+## v2.3 — 2026-05-17  Unified Settings dialog
+
+### Problem
+
+All user-configurable paths were managed through separate, disconnected UI
+entry points: a bare `QFileDialog` file picker on first launch, a
+**Databases & Cache…** menu item, and a **Settings > Set Documents Folder…**
+menu item. There was no single place to configure the application from scratch.
+
+### Solution
+
+A single **Settings** dialog (titled *findethedox — Settings*) now covers all
+three path settings in one place.
+
+**Dialog contents**
+
+| Field | Description |
+|---|---|
+| Cache folder | Where `findethedox.cache.db` is stored; full derived path shown below |
+| Documents folder | Optional fallback folder for document files |
+| Databases | List of allmydox source databases with status icons (✓ ⚠ ✗ —) |
+
+The **Build / Update Cache** button is also part of the dialog, so the complete
+first-run workflow is self-contained.
+
+**Shown on startup**
+
+When no database is configured (first launch or cleared config), the Settings
+dialog opens automatically instead of a bare file picker. The user can set all
+paths, add databases, and optionally build the cache before the main window
+appears. The result is saved to `~/.config/findethedox/config.json`.
+
+**Accessible from the menu**
+
+The separate *File > Databases & Cache…* and *Settings > Set Documents Folder…*
+items are replaced by a single **File > Settings… (Ctrl+,)** entry.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `app.py` | `SetupDialog` gains `docs_folder` parameter, documents folder row with Browse button, `result_docs_folder()` accessor; menu simplified to single **Settings…** item; `_on_setup_dialog()` reads and saves docs folder; removed broken `_on_set_docs_folder()` |
+| `main.py` | Shows `SetupDialog` on startup instead of bare `QFileDialog`; saves full config after first-run setup |
+
+---
+
 ## v2.2 — 2026-05-11  Documentation and Mermaid diagrams
 
 Added three new documentation files and updated the existing ones to reflect
