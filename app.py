@@ -167,13 +167,14 @@ class _SentenceWorker(QThread):
 class SetupDialog(QDialog):
     """Configure databases, cache location, and documents folder in one place."""
 
-    def __init__(self, db_paths: list[str], cache_folder: str, docs_folder: str = "", parent=None):
+    def __init__(self, db_paths: list[str], cache_path: str, docs_folder: str = "", parent=None):
         super().__init__(parent)
         self.setWindowTitle("findethedox — Settings")
         self.resize(700, 540)
 
         self._db_paths: list[str] = list(db_paths)
-        self._cache_folder: str = cache_folder
+        self._cache_path: str = cache_path
+        self._cache_folder: str = str(Path(cache_path).parent)
         self._docs_folder: str = docs_folder
         self._worker: _CacheWorker | None = None
 
@@ -188,7 +189,7 @@ class SetupDialog(QDialog):
         return list(self._db_paths)
 
     def result_cache_path(self) -> str:
-        return str(Path(self._cache_folder) / _CACHE_FILENAME)
+        return self._cache_path
 
     def result_cache_folder(self) -> str:
         return self._cache_folder
@@ -298,15 +299,14 @@ class SetupDialog(QDialog):
     # State
 
     def _refresh(self):
-        cp = self.result_cache_path()
         self._cache_edit.setText(self._cache_folder)
-        self._cache_file_lbl.setText(f"  {cp}")
+        self._cache_file_lbl.setText(f"  {self._cache_path}")
         self._docs_edit.setText(self._docs_folder)
         self._db_list.clear()
 
         statuses: list[str] = []
         for db_path in self._db_paths:
-            status = _cache_db_status(cp, db_path)
+            status = _cache_db_status(self._cache_path, db_path)
             statuses.append(status)
             icon, color = _STATUS_DISPLAY[status]
             item = QListWidgetItem(f"  {icon}  {db_path}")
@@ -353,6 +353,7 @@ class SetupDialog(QDialog):
         )
         if folder:
             self._cache_folder = folder
+            self._cache_path = str(Path(folder) / _CACHE_FILENAME)
             self._refresh()
 
     def _on_browse_docs(self):
@@ -619,9 +620,8 @@ class MainWindow(QMainWindow):
         self.close()
 
     def _on_setup_dialog(self):
-        cache_folder = str(Path(self._cache_path).parent)
         dlg = SetupDialog(
-            self._db_paths, cache_folder,
+            self._db_paths, self._cache_path,
             docs_folder=self._docs_folder or "",
             parent=self,
         )
