@@ -641,6 +641,32 @@ confusing.
 
 ---
 
+## v2.4 — 2026-05-17  Fix cache status detection
+
+### Problem
+
+The Settings dialog derived the cache path as `<folder>/findethedox.cache.db`
+regardless of the actual filename on disk. Caches created with an older version
+of the app (where `default_cache_path()` named the file after the database, e.g.
+`allmydox.cache.db`) were invisible to the status check. The dialog showed
+"no cache" for all databases even though the cache was present and in use.
+
+### Fix
+
+`SetupDialog` now receives the full `cache_path` directly instead of just a
+folder. Status checks run against that real file. Only when the user explicitly
+browses to a new cache folder does the path reset to
+`<new_folder>/findethedox.cache.db`.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `app.py` | `SetupDialog.__init__` parameter `cache_folder` → `cache_path`; `_cache_path` stored and used for status checks; `_cache_folder` derived from it; `result_cache_path()` returns `_cache_path`; `_on_browse_cache()` updates both; `_on_setup_dialog()` passes `self._cache_path` directly |
+| `main.py` | Startup dialog receives resolved `cache_path` instead of folder |
+
+---
+
 ## v2.3 — 2026-05-17  Unified Settings dialog
 
 ### Problem
