@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QApplication, QDialog, QDialogButtonBox, QMainWindow, QWidget,
     QHBoxLayout, QVBoxLayout,
     QLineEdit, QLabel, QListWidget, QListWidgetItem,
+    QTreeWidget, QTreeWidgetItem, QHeaderView,
     QSplitter, QStatusBar, QProgressDialog, QFileDialog, QMessageBox,
     QPushButton,
 )
@@ -127,7 +128,9 @@ class _SearchWorker(QThread):
             occs: list[query.DocOccurrence] = []
             for db_path in self._db_paths:
                 dc = query.connect(db_path)
-                occs.extend(query.document_occurrences(dc, self._word))
+                for occ in query.document_occurrences(dc, self._word):
+                    occ.source_db = db_path
+                    occs.append(occ)
                 dc.close()
             # Deduplicate across sources
             seen: set[tuple] = set()
@@ -165,18 +168,27 @@ class _SentenceWorker(QThread):
 # ---------------------------------------------------------------------------
 
 class SetupDialog(QDialog):
-    """Configure databases, cache location, and documents folder in one place."""
+    """Configure databases, cache location, and per-database documents folders."""
 
-    def __init__(self, db_paths: list[str], cache_path: str, docs_folder: str = "", parent=None):
+    def __init__(self, db_paths: list[str], cache_path: str,
+                 docs_folder: str = "", db_docs: dict[str, str] | None = None,
+                 parent=None):
         super().__init__(parent)
         self.setWindowTitle("findethedox — Settings")
-        self.resize(700, 540)
+        self.resize(820, 560)
 
         self._db_paths: list[str] = list(db_paths)
         self._cache_path: str = cache_path
         self._cache_folder: str = str(Path(cache_path).parent)
         self._docs_folder: str = docs_folder
         self._worker: _CacheWorker | None = None
+
+        # Per-DB docs folders: load from cache meta, then fill gaps from passed-in dict
+        self._db_docs: dict[str, str] = cache_mod.get_docs_folders(self._cache_path)
+        if db_docs:
+            for k, v in db_docs.items():
+                if k not in self._db_docs and v:
+                    self._db_docs[k] = v
 
         self._build_ui()
         self._apply_dark_theme()
@@ -196,6 +208,9 @@ class SetupDialog(QDialog):
 
     def result_docs_folder(self) -> str:
         return self._docs_folder
+
+    def result_db_docs(self) -> dict[str, str]:
+        return {k: v for k, v in self._db_docs.items() if v}
 
     # ------------------------------------------------------------------
     # UI
@@ -220,18 +235,6 @@ class SetupDialog(QDialog):
         self._cache_file_lbl.setStyleSheet("color:#888;font-size:11px;margin-left:2px;")
         root.addWidget(self._cache_file_lbl)
 
-        # Documents folder row
-        docs_row = QHBoxLayout()
-        docs_row.addWidget(QLabel("Documents folder:"))
-        self._docs_edit = QLineEdit()
-        self._docs_edit.setReadOnly(True)
-        self._docs_edit.setPlaceholderText("Optional — folder where documents are stored")
-        docs_row.addWidget(self._docs_edit, 1)
-        btn_browse_docs = QPushButton("Browse…")
-        btn_browse_docs.clicked.connect(self._on_browse_docs)
-        docs_row.addWidget(btn_browse_docs)
-        root.addLayout(docs_row)
-
         # Databases header
         db_hdr = QHBoxLayout()
         db_hdr.addWidget(QLabel("Databases:"))
@@ -241,10 +244,20 @@ class SetupDialog(QDialog):
         db_hdr.addWidget(self._add_btn)
         root.addLayout(db_hdr)
 
-        # Database list
-        self._db_list = QListWidget()
-        self._db_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        root.addWidget(self._db_list, 1)
+        # Database tree (two columns: path + docs folder)
+        self._db_tree = QTreeWidget()
+        self._db_tree.setColumnCount(2)
+        self._db_tree.setHeaderLabels(["Database", "Documents Folder"])
+        self._db_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._db_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._db_tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+        self._db_tree.setRootIsDecorated(False)
+        self._db_tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
+        root.addWidget(self._db_tree, 1)
+
+        docs_hint = QLabel("Double-click the Documents Folder column to set a folder per database")
+        docs_hint.setStyleSheet("color:#888;font-size:10px;")
+        root.addWidget(docs_hint)
 
         # Remove row
         remove_row = QHBoxLayout()
@@ -281,12 +294,16 @@ class SetupDialog(QDialog):
                 background:#2d2d2d; border:1px solid #555;
                 border-radius:4px; padding:4px 8px; color:#d4d4d4;
             }
-            QListWidget {
+            QTreeWidget {
                 background:#2d2d2d; border:1px solid #444; color:#d4d4d4;
+                alternate-background-color:#252525;
             }
-            QListWidget::item { padding:3px 6px; }
-            QListWidget::item:hover    { background:#3a3a3a; }
-            QListWidget::item:selected { background:#264f78; color:#d4d4d4; }
+            QTreeWidget::item { padding:3px 6px; }
+            QTreeWidget::item:hover    { background:#3a3a3a; }
+            QTreeWidget::item:selected { background:#264f78; color:#d4d4d4; }
+            QHeaderView::section {
+                background:#333; color:#aaa; border:1px solid #444; padding:3px 6px;
+            }
             QPushButton {
                 background:#2d2d2d; border:1px solid #555;
                 border-radius:4px; padding:4px 12px; color:#d4d4d4;
@@ -301,18 +318,23 @@ class SetupDialog(QDialog):
     def _refresh(self):
         self._cache_edit.setText(self._cache_folder)
         self._cache_file_lbl.setText(f"  {self._cache_path}")
-        self._docs_edit.setText(self._docs_folder)
-        self._db_list.clear()
+        self._db_tree.clear()
 
         statuses: list[str] = []
         for db_path in self._db_paths:
             status = _cache_db_status(self._cache_path, db_path)
             statuses.append(status)
             icon, color = _STATUS_DISPLAY[status]
-            item = QListWidgetItem(f"  {icon}  {db_path}")
-            item.setForeground(QColor(color))
-            item.setData(Qt.ItemDataRole.UserRole, db_path)
-            self._db_list.addItem(item)
+            docs = self._db_docs.get(db_path, "")
+            docs_ok = Path(docs).is_dir() if docs else True
+
+            item = QTreeWidgetItem([f"  {icon}  {db_path}", docs])
+            item.setForeground(0, QColor(color))
+            item.setForeground(1, QColor("#e06c75") if (docs and not docs_ok)
+                               else QColor("#888888") if not docs
+                               else QColor("#d4d4d4"))
+            item.setData(0, Qt.ItemDataRole.UserRole, db_path)
+            self._db_tree.addTopLevelItem(item)
 
         no_dbs      = not self._db_paths
         no_cache    = any(s == "no_cache"  for s in statuses)
@@ -356,14 +378,18 @@ class SetupDialog(QDialog):
             self._cache_path = str(Path(folder) / _CACHE_FILENAME)
             self._refresh()
 
-    def _on_browse_docs(self):
+    def _on_tree_double_clicked(self, item: QTreeWidgetItem, column: int):
+        if column != 1:
+            return
+        db_path = item.data(0, Qt.ItemDataRole.UserRole)
+        current = self._db_docs.get(db_path, "")
         folder = QFileDialog.getExistingDirectory(
-            self, "Select Documents Folder",
-            self._docs_folder or str(Path.home()),
+            self, f"Documents folder for {Path(db_path).name}",
+            current or str(Path.home()),
         )
         if folder:
-            self._docs_folder = folder
-            self._docs_edit.setText(folder)
+            self._db_docs[db_path] = folder
+            self._refresh()
 
     def _on_add_database(self):
         start = (
@@ -387,8 +413,8 @@ class SetupDialog(QDialog):
 
     def _on_remove(self):
         to_remove = {
-            item.data(Qt.ItemDataRole.UserRole)
-            for item in self._db_list.selectedItems()
+            item.data(0, Qt.ItemDataRole.UserRole)
+            for item in self._db_tree.selectedItems()
         }
         self._db_paths = [p for p in self._db_paths if p not in to_remove]
         self._refresh()
@@ -441,6 +467,7 @@ class MainWindow(QMainWindow):
         db_paths,
         docs_folder: str | None = None,
         cache_path: str | None = None,
+        db_docs: dict[str, str] | None = None,
     ):
         super().__init__()
         self.resize(1280, 760)
@@ -450,6 +477,7 @@ class MainWindow(QMainWindow):
         self._db_paths    = db_paths
         self._docs_folder = docs_folder
         self._cache_path  = cache_path or cache_mod.default_cache_path(db_paths)
+        self._db_docs: dict[str, str] = db_docs or {}
         self._cache_conn  = None                           # set after cache is ready
         self._current_word: str = ""
         self._search_worker: _SearchWorker | None = None
@@ -636,6 +664,7 @@ class MainWindow(QMainWindow):
         dlg = SetupDialog(
             self._db_paths, self._cache_path,
             docs_folder=self._docs_folder or "",
+            db_docs=self._db_docs,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -643,17 +672,22 @@ class MainWindow(QMainWindow):
         new_db_paths    = dlg.result_db_paths()
         new_cache_path  = dlg.result_cache_path()
         new_docs_folder = dlg.result_docs_folder() or None
+        new_db_docs     = dlg.result_db_docs()
         if self._cache_conn:
             self._cache_conn.close()
             self._cache_conn = None
+        # Persist per-DB docs folders into the cache meta table
+        for db_path, folder in new_db_docs.items():
+            cache_mod.set_docs_folder(new_cache_path, db_path, folder)
         cfg = config_mod.load()
         cfg["db_paths"]     = new_db_paths
         cfg["cache_path"]   = new_cache_path
         cfg["cache_folder"] = dlg.result_cache_folder()
         cfg["docs_folder"]  = new_docs_folder
+        cfg["db_docs"]      = new_db_docs
         config_mod.save(cfg)
         new_win = MainWindow(new_db_paths, docs_folder=new_docs_folder,
-                             cache_path=new_cache_path)
+                             cache_path=new_cache_path, db_docs=new_db_docs)
         new_win.show()
         self.close()
 
@@ -685,6 +719,8 @@ class MainWindow(QMainWindow):
     def _on_indexes_ready(self):
         if cache_mod.is_built(self._cache_path):
             # Cache exists — use it as-is; user can rebuild via the toolbar button
+            if not self._db_docs:
+                self._db_docs = cache_mod.get_docs_folders(self._cache_path)
             self._cache_conn = cache_mod.connect(self._cache_path)
             self._load_global()
         else:
@@ -729,6 +765,17 @@ class MainWindow(QMainWindow):
     # Event handlers
     # ------------------------------------------------------------------
 
+    def _resolve_filepath(self, occ: query.DocOccurrence) -> Path:
+        """Resolve document path: stored path → per-DB docs folder → global fallback."""
+        filepath = Path(occ.folderpath) / occ.filename
+        if not filepath.exists():
+            db_folder = self._db_docs.get(occ.source_db, "")
+            if db_folder:
+                filepath = Path(db_folder) / occ.filename
+        if not filepath.exists() and self._docs_folder:
+            filepath = Path(self._docs_folder) / occ.filename
+        return filepath
+
     def _on_text_changed(self, text: str):
         if not text.strip():
             self._load_global()
@@ -749,10 +796,8 @@ class MainWindow(QMainWindow):
 
     def _on_doc_clicked(self, item: QListWidgetItem):
         occ: query.DocOccurrence = item.data(Qt.ItemDataRole.UserRole)
-        filepath = Path(occ.folderpath) / occ.filename
-        if not filepath.exists() and self._docs_folder:
-            filepath = Path(self._docs_folder) / occ.filename
-        dlg = DocViewerDialog(str(filepath), occ.pagenumber, self._current_word, self)
+        filepath = self._resolve_filepath(occ)
+        dlg = DocViewerDialog(str(filepath), occ.pagenumber, self._current_word, parent=self)
         dlg.exec()
 
     # ------------------------------------------------------------------
@@ -821,10 +866,7 @@ class MainWindow(QMainWindow):
     def _on_doc_selected(self, item: QListWidgetItem):
         """Single-click on a document: show matching sentences in the right panel."""
         occ: query.DocOccurrence = item.data(Qt.ItemDataRole.UserRole)
-        filepath = Path(occ.folderpath) / occ.filename
-        if not filepath.exists() and self._docs_folder:
-            filepath = Path(self._docs_folder) / occ.filename
-
+        filepath = self._resolve_filepath(occ)
         self._current_filepath = str(filepath)
         self._sent_list.clear()
 

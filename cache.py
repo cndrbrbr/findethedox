@@ -235,6 +235,37 @@ def update(db_paths, cache_path: str, progress: ProgressFn | None = None):
 # Cached query functions
 # ---------------------------------------------------------------------------
 
+def get_docs_folders(cache_path: str) -> dict[str, str]:
+    """Return {db_path: docs_folder} stored in cache meta (keys 'docs:<path>')."""
+    if not Path(cache_path).exists():
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT key, value FROM meta WHERE key LIKE 'docs:%'"
+        ).fetchall()
+        conn.close()
+        return {row[0][5:]: row[1] for row in rows}
+    except Exception:
+        return {}
+
+
+def set_docs_folder(cache_path: str, db_path: str, docs_folder: str):
+    """Store or update the documents folder for a source DB in cache meta."""
+    if not Path(cache_path).exists():
+        return
+    try:
+        conn = sqlite3.connect(cache_path)
+        conn.execute("""
+            INSERT INTO meta VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """, (f"docs:{db_path}", docs_folder))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def connect(cache_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row

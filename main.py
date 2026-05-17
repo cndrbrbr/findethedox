@@ -50,6 +50,7 @@ def main():
 
     docs_folder: str | None = args.docs or cfg.get("docs_folder") or None
     cache_path:  str | None = args.cache or cfg.get("cache_path") or None
+    db_docs: dict[str, str] = cfg.get("db_docs") or {}
 
     if not db_paths:
         cache_folder = cfg.get("cache_folder") or str(Path.home())
@@ -72,7 +73,7 @@ def main():
             "docs_folder":  docs_folder,
         })
 
-    window = MainWindow(db_paths, docs_folder=docs_folder, cache_path=cache_path)
+    window = MainWindow(db_paths, docs_folder=docs_folder, cache_path=cache_path, db_docs=db_docs)
     window.show()
     sys.exit(app.exec())
 
