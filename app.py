@@ -376,6 +376,13 @@ class SetupDialog(QDialog):
         )
         if chosen and chosen not in self._db_paths:
             self._db_paths.append(chosen)
+            # If the configured cache doesn't exist yet, look for a legacy
+            # cache next to the database (e.g. archive.cache.db beside archive.db)
+            if not Path(self._cache_path).exists():
+                legacy = cache_mod.default_cache_path([chosen])
+                if Path(legacy).exists():
+                    self._cache_path = legacy
+                    self._cache_folder = str(Path(legacy).parent)
             self._refresh()
 
     def _on_remove(self):
