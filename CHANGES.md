@@ -641,6 +641,57 @@ confusing.
 
 ---
 
+## v2.7 — 2026-05-17  Per-database documents folder
+
+### Overview
+
+Each source database now has its own documents folder, stored in the cache
+database's `meta` table. The Settings dialog shows the folder in a second
+column next to each database entry and lets the user browse or change it by
+double-clicking. Unreachable paths are shown in red.
+
+### Storage
+
+Per-DB folders are stored as `docs:<db_path>` keys in the cache meta table,
+alongside the existing `src:<db_path>` watermarks. They are also mirrored to
+`~/.config/findethedox/config.json` under the key `db_docs` so they survive
+a cache rebuild.
+
+### Settings dialog
+
+The "Documents folder" global row has been removed. The database list is now
+a two-column tree:
+
+| Column | Content |
+|---|---|
+| Database | Status icon (✓ ⚠ ✗ —) and path |
+| Documents Folder | Per-DB folder path; grey if unset, red if set but not reachable |
+
+Double-clicking the **Documents Folder** column opens a folder picker for that
+specific database. The hint line below the tree explains this.
+
+### Path resolution order
+
+When the app resolves a document path it now tries three locations in order:
+
+1. `folderpath / filename` — the path stored in the allmydox database
+2. `per-DB docs folder / filename` — the folder configured for the source database
+3. `global docs folder / filename` — the legacy fallback (still read from config)
+
+`DocOccurrence` gained a `source_db` field so the right per-DB folder is
+looked up for each occurrence.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `cache.py` | `get_docs_folders()` — reads all `docs:*` entries from cache meta; `set_docs_folder()` — upserts one entry |
+| `query.py` | `DocOccurrence` gains `source_db: str = ""` field |
+| `app.py` | `SetupDialog` accepts `db_docs` param, loads from cache meta, replaces `QListWidget` with two-column `QTreeWidget`, double-click handler on column 1, `result_db_docs()`; `MainWindow` accepts `db_docs`, loads from cache on startup, `_resolve_filepath()` helper, saves per-DB folders to cache and config on Apply; `_SearchWorker` tags each `DocOccurrence` with `source_db` |
+| `main.py` | Passes `db_docs` from config to `MainWindow` |
+
+---
+
 ## v2.6 — 2026-05-17  Double-click sentence to open document at that position
 
 Double-clicking a sentence in the sentence panel now opens the document viewer

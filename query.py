@@ -17,6 +17,7 @@ class DocOccurrence:
     folderpath: str
     pagenumber: int
     position: int
+    source_db: str = ""
 
 
 def connect(db_path: str) -> sqlite3.Connection:
