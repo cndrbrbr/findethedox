@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
 class DocViewerDialog(QDialog):
     """Modal viewer that opens a document at a specific page and highlights a word."""
 
-    def __init__(self, filepath: str, pagenumber: int, word: str, parent=None):
+    def __init__(self, filepath: str, pagenumber: int, word: str, sentence: str = "", parent=None):
         super().__init__(parent)
         self.setWindowTitle(Path(filepath).name)
         self.resize(860, 680)
@@ -28,9 +28,9 @@ class DocViewerDialog(QDialog):
         if ext == ".pdf":
             widget = _PdfViewer(filepath, pagenumber, word)
         elif ext == ".docx":
-            widget = _TextViewer(filepath, word, mode="docx")
+            widget = _TextViewer(filepath, word, mode="docx", sentence=sentence)
         else:
-            widget = _TextViewer(filepath, word, mode="txt")
+            widget = _TextViewer(filepath, word, mode="txt", sentence=sentence)
 
         layout.addWidget(widget)
 
@@ -121,7 +121,7 @@ class _PdfViewer(QWidget):
 class _TextViewer(QWidget):
     """Shows plain text content with the search word highlighted."""
 
-    def __init__(self, filepath: str, word: str, mode: str):
+    def __init__(self, filepath: str, word: str, mode: str, sentence: str = ""):
         super().__init__()
         layout = QVBoxLayout(self)
 
@@ -143,8 +143,11 @@ class _TextViewer(QWidget):
 
         editor.setPlainText(text)
 
-        # Scroll to first occurrence
-        cursor = editor.document().find(word)
+        # Scroll to the specific sentence if given, otherwise to the first word occurrence
+        target = sentence[:80] if sentence else word
+        cursor = editor.document().find(target)
+        if cursor.isNull() and sentence:
+            cursor = editor.document().find(word)
         if not cursor.isNull():
             editor.setTextCursor(cursor)
             editor.ensureCursorVisible()
@@ -154,27 +157,37 @@ class _TextViewer(QWidget):
 # Sentence extraction (used by the sentence panel in app.py)
 # ---------------------------------------------------------------------------
 
-def sentences_containing(filepath: str, word: str) -> list[str]:
-    """Return all sentences in filepath that contain word (case-insensitive)."""
+def sentences_containing(filepath: str, word: str) -> list[tuple[str, int]]:
+    """Return (sentence, page_number) pairs for all sentences containing word.
+
+    page_number is 1-based for PDFs; 0 for DOCX/TXT (page concept not applicable).
+    """
     ext = Path(filepath).suffix.lower()
+    w = word.lower()
+    results: list[tuple[str, int]] = []
+
     try:
         if ext == ".pdf":
             import fitz
             doc = fitz.open(filepath)
-            text = " ".join(page.get_text("text") for page in doc)
+            for page_idx, page in enumerate(doc):
+                text = re.sub(r'\s+', ' ', page.get_text("text"))
+                for s in re.split(r'(?<=[.!?])\s+', text):
+                    if s.strip() and w in s.lower():
+                        results.append((s.strip(), page_idx + 1))
             doc.close()
-        elif ext == ".docx":
-            from docx import Document
-            doc = Document(filepath)
-            text = "\n".join(p.text for p in doc.paragraphs)
         else:
-            text = Path(filepath).read_text(encoding="utf-8", errors="replace")
+            if ext == ".docx":
+                from docx import Document
+                doc = Document(filepath)
+                text = "\n".join(p.text for p in doc.paragraphs)
+            else:
+                text = Path(filepath).read_text(encoding="utf-8", errors="replace")
+            text = re.sub(r'\s+', ' ', text)
+            for s in re.split(r'(?<=[.!?])\s+', text):
+                if s.strip() and w in s.lower():
+                    results.append((s.strip(), 0))
     except Exception:
         return []
 
-    # Flatten whitespace so sentences aren't broken by line wraps
-    text = re.sub(r'\s+', ' ', text)
-
-    parts = re.split(r'(?<=[.!?])\s+', text)
-    w = word.lower()
-    return [s.strip() for s in parts if s.strip() and w in s.lower()]
+    return results

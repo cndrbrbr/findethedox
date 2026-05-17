@@ -641,6 +641,41 @@ confusing.
 
 ---
 
+## v2.6 — 2026-05-17  Double-click sentence to open document at that position
+
+Double-clicking a sentence in the sentence panel now opens the document viewer
+scrolled directly to that sentence, instead of just to the first occurrence of
+the search word.
+
+### Changes
+
+**PDF files**
+
+`sentences_containing()` now processes each page individually and records the
+1-based page number alongside every sentence. A double-click opens
+`DocViewerDialog` at the exact page where that sentence appears.
+
+**DOCX / TXT files**
+
+The `_TextViewer` widget receives the sentence text and uses the first 80
+characters as the search target for `QTextDocument.find()`, placing the cursor
+precisely at that sentence. Falls back to the plain word search if the sentence
+text is not found verbatim.
+
+**Hint label**
+
+A hint line *"Double-click: open document at this sentence"* appears below the
+sentence list.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `doc_viewer.py` | `sentences_containing()` returns `list[tuple[str, int]]` (sentence, page); `DocViewerDialog` gains optional `sentence` parameter; `_TextViewer` scrolls to sentence text when given |
+| `app.py` | `_current_filepath` tracked on doc select; `_on_sentences_ready()` stores `(text, page)` in item UserRole; `_on_sentence_double_clicked()` handler; double-click signal connected; hint label added |
+
+---
+
 ## v2.5 — 2026-05-17  Auto-detect legacy cache on database add
 
 ### Problem
