@@ -53,7 +53,11 @@ def main():
 
     if not db_paths:
         cache_folder = cfg.get("cache_folder") or str(Path.home())
-        dlg = SetupDialog([], cache_folder, docs_folder=docs_folder or "")
+        initial_cache_path = (
+            cache_path
+            or str(Path(cache_folder) / "findethedox.cache.db")
+        )
+        dlg = SetupDialog([], initial_cache_path, docs_folder=docs_folder or "")
         if dlg.exec() != QDialog.DialogCode.Accepted:
             sys.exit(0)
         db_paths = dlg.result_db_paths()
