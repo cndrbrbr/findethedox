@@ -6,8 +6,9 @@ findethedox has three conceptual layers:
 
 1. **Source databases** — one or more `allmydox.db` SQLite files that contain
    the indexed document vocabulary and co-occurrence tables.
-2. **Cache** — a single pre-computed `findethedox.cache.db` that aggregates
-   all co-occurrence scores across all sources so every search takes 2–5 ms.
+2. **Caches** — one pre-computed `<name>.cache.db` per source database,
+   stored in the data folder. Searches query every cache and sum the scores,
+   so each search takes a few ms.
 3. **UI** — a PyQt6 main window with three interactive word clouds, a document
    panel, a sentence panel, and a built-in document viewer.
 
@@ -20,7 +21,7 @@ flowchart LR
     end
 
     subgraph build["cache.py — built once, incremental updates per source"]
-        c[("findethedox.cache.db\n───────────────\ncooccurrence\nword_freq\nmeta")]
+        c[("<name>.cache.db (one per source DB)\n───────────────\ncooccurrence\nword_freq\nmeta")]
     end
 
     subgraph ftd["findethedox"]
@@ -129,23 +130,23 @@ if cur > last:
     write new watermark to meta
 ```
 
-A brand-new source database (no watermark) is treated as `last = 0`, so all
-its documents are processed as "new" and its data is merged into the existing
-cache without a full rebuild.
-
 ### Cache file location
 
-The cache file is always named `findethedox.cache.db`. The user picks a folder
-in the **Databases & Cache** dialog; the derived path is saved to config. Each
-independent database set (different combination of sources) should use its own
-folder to avoid mixing unrelated data.
+Each source database `<name>.db` has its own cache `<name>.cache.db`
+(`cache.cache_path_for()`). It lives in the **data folder** chosen in the
+Settings dialog; without a data folder it is placed next to the database.
+`cache.find_databases()` lists every allmydox DB in the data folder (any
+`*.db` with a `documents` table, excluding `*.cache.db`).
 
-### One cache, multiple sources
+### One cache per source
 
-There is exactly **one** cache file per session. It contains the combined
-co-occurrence data from all source databases. The `meta` table's per-source
-watermarks allow the update process to add or refresh individual sources
-without disturbing the rest of the cache.
+Caches are independent: adding, removing or rebuilding one database never
+touches the others. The `meta` table stores `max_file_id` (the watermark),
+`src:<path>` and `docs_folder`. The watermark lookup falls back to a single
+`src:*` row, so a cache still works after the data folder has been moved.
+`cache.cooccurrences()` and `cache.global_frequencies()` take a list of
+connections and sum the scores per `(word, kind)`; each cache contributes its
+own top 200 / top 450 rows before merging.
 
 ---
 
@@ -167,18 +168,18 @@ SQLite connections (connections cannot be shared across threads).
 
 ```
 main.py
-  └─ load config, resolve db_paths / cache_path
-  └─ MainWindow(db_paths, cache_path)
+  └─ load config, resolve data_folder → db_paths (scan + external − disabled)
+  └─ MainWindow(db_paths, data_folder)
 
 MainWindow.__init__
   └─ _IndexWorker  ──────────────────────── ensure 9 source-DB indexes exist
         └─ done → _on_indexes_ready()
-              ├─ cache exists? → connect, load_global() → show clouds
-              └─ no cache     → _CacheWorker(mode="build")
-                                      └─ done → connect, load_global() → show clouds
+              ├─ all caches exist? → connect each, load_global() → show clouds
+              └─ some missing     → _CacheWorker([(db, cache, "build"), …])
+                                      └─ done → connect each, load_global() → show clouds
 
 Toolbar "Rebuild Cache"
-  └─ _CacheWorker(mode="build")  ─────── full rebuild from scratch
+  └─ _CacheWorker([(db, cache, "build") for every active db])  ── full rebuild
 ```
 
 ---
@@ -226,14 +227,15 @@ _SentenceWorker:
 
 ```json
 {
-  "db_paths":     ["/path/to/first.db", "/path/to/second.db"],
-  "cache_path":   "/path/to/cache/findethedox.cache.db",
-  "cache_folder": "/path/to/cache",
+  "data_folder":  "/path/to/datafolder",
+  "external_dbs": ["/elsewhere/third.db"],
+  "disabled_dbs": ["/path/to/datafolder/old.db"],
+  "db_docs":      {"/path/to/datafolder/first.db": "/path/to/documents"},
   "docs_folder":  "/path/to/documents"
 }
 ```
 
-`cache_path` is derived as `cache_folder + "/findethedox.cache.db"` and stored
-redundantly so that code that reads only `cache_path` (e.g. the startup path
-resolver in `main.py`) continues to work without knowledge of the folder
-convention.
+The active databases are every allmydox DB in `data_folder` plus
+`external_dbs`, minus `disabled_dbs`. Older configs that only contain
+`db_paths` are read as `external_dbs`; the legacy keys are dropped the next
+time settings are saved.

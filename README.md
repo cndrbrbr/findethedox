@@ -59,9 +59,18 @@ machine, pass the folder where the files now live:
 python3 main.py /path/to/allmydox.db --docs /path/to/documents
 ```
 
-On the first launch the application builds a search cache. This takes a
-few minutes depending on database size and only happens once — subsequent
-launches are instant.
+To keep all databases and their cache files together, put the `.db` files in
+one folder and pass it as the data folder — every allmydox database found
+there is searched:
+
+```bash
+python3 main.py --data /path/to/datafolder
+```
+
+On the first launch the application builds a search cache for each database
+(`<name>.cache.db` in the data folder). This takes a few minutes depending on
+database size and only happens once per database — subsequent launches are
+instant.
 
 ---
 
@@ -78,7 +87,7 @@ flowchart LR
     end
 
     subgraph build["cache.py — built once, incremental updates per source"]
-        c[("findethedox.cache.db\n───────────────\ncooccurrence\nword_freq\nmeta")]
+        c[("<name>.cache.db (one per source DB)\n───────────────\ncooccurrence\nword_freq\nmeta")]
     end
 
     subgraph ftd["findethedox"]
@@ -193,7 +202,7 @@ occurrence of the word and scrolled into view.
 | Item | Shortcut | Description |
 |---|---|---|
 | Open Database… | Ctrl+O | Pick a different `.db` file and open it in a new window |
-| Databases & Cache… | Ctrl+Shift+O | Manage databases and cache (see below) |
+| Settings… | Ctrl+, | Data folder, databases and caches (see below) |
 
 ### Settings menu
 
@@ -210,44 +219,51 @@ filename inside the documents folder you specify.
 
 | Button | Description |
 |---|---|
-| Rebuild Cache | Deletes the current cache and rebuilds it from scratch (confirmation required) |
+| Rebuild Cache | Deletes the caches of all active databases and rebuilds them from scratch (confirmation required) |
 
 ---
 
-## Databases & Cache dialog
+## Settings dialog
 
-Open via **File > Databases & Cache…** or press **Ctrl+Shift+O**.
+Open via **File > Settings…** or press **Ctrl+,**.
 
-This dialog is the central place to configure which databases are loaded and
-where the cache is stored.
+This dialog is the central place to configure where databases and caches
+live and which databases are searched.
 
-### Cache folder
+### Data folder
 
-Select the folder where `findethedox.cache.db` will be stored. The full path
-is shown below the field. One cache covers all databases in the current session.
+Select the folder that holds your allmydox databases. Every allmydox `.db`
+file in it is listed automatically (click **Rescan** after copying new files
+into the folder). Each database gets its **own cache file**,
+`<name>.cache.db`, stored in the same folder — e.g. `archive.db` →
+`archive.cache.db`.
 
 ### Database list
 
-Each database appears in the list with a status indicator:
+Each database appears with a checkbox, its cache file and its documents
+folder. Only ticked databases are searched. The status icon shows the state
+of the database's cache:
 
 | Icon | Colour | Meaning |
 |---|---|---|
-| ✓ | Green | In the cache and up to date |
-| ⚠ | Yellow | In the cache, but new documents have been added to the source since the last build |
-| ✗ | Red | Not yet included in the cache |
+| ✓ | Green | Cache up to date |
+| ⚠ | Yellow | Cache exists, but new documents have been added to the source since the last build |
+| ✗ | Red | A cache file with that name exists but does not belong to this database |
 | — | Grey | Cache file does not exist yet |
 
-Use **Add Database…** to append a source database to the list. Select one or
-more entries and click **Remove Selected** to remove them.
+**Add Database…** adds a database stored outside the data folder; its cache
+is still written to the data folder. Two databases with the same file name
+would share a cache file, so this is refused. **Remove Selected** removes
+external databases; databases inside the data folder are only unticked.
 
-### Building and updating the cache
+### Building and updating the caches
 
-The **Build Cache** / **Update Cache** button processes any databases that are
-missing or outdated:
+The **Build Caches** / **Update Caches** button processes every ticked
+database whose cache is missing or outdated:
 
-- If no cache exists, a full build runs from scratch.
-- If a cache exists, only the databases marked ✗ or ⚠ are processed
-  (incremental update). Existing cache data for up-to-date sources is preserved.
+- A database without a cache gets a full build.
+- A database marked ⚠ gets an incremental update — only the new documents
+  are processed.
 
 A progress dialog shows each step. The status icons refresh automatically when
 the operation completes.
@@ -255,19 +271,21 @@ the operation completes.
 ### Applying changes
 
 Click **Apply** to save the configuration and reopen the main window with the
-new database set. Click **Cancel** to discard any changes.
+ticked databases. Click **Cancel** to discard any changes.
 
 ---
 
 ## Multiple databases
 
-findethedox can search across several allmydox databases simultaneously. All
-co-occurrence scores and word frequencies are combined in a single cache.
-When you search for a word, documents from all sources are listed together
-and duplicates are removed.
+findethedox can search across several allmydox databases simultaneously.
+Each database has its own cache file; when you search, the co-occurrence
+scores and word frequencies of all ticked databases are added together.
+Documents from all sources are listed together and duplicates are removed.
 
-To use multiple databases, open **Databases & Cache…** and add as many
-`.db` files as you need, then build or update the cache.
+To use multiple databases, put the `.db` files into the data folder (or add
+them via **Add Database…**) in **Settings…**, then build the caches. Because
+the caches are independent, adding or removing a database never requires
+rebuilding the others.
 
 ---
 
@@ -276,6 +294,6 @@ To use multiple databases, open **Databases & Cache…** and add as many
 - The source databases are opened **read-only** during normal operation. The
   only write to a source database is the one-time index creation on first launch.
 - If you add new documents to a source database using allmydox, open
-  **Databases & Cache…** and click **Update Cache** to pick them up.
+  **Settings…** and click **Update Caches** to pick them up.
 - All settings are saved automatically to
   `~/.config/findethedox/config.json` and restored on the next launch.
