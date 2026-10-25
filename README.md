@@ -203,23 +203,14 @@ occurrence of the word and scrolled into view.
 |---|---|---|
 | Open Database… | Ctrl+O | Pick a different `.db` file and open it in a new window |
 | Settings… | Ctrl+, | Data folder, databases and caches (see below) |
-
-### Settings menu
-
-| Item | Description |
-|---|---|
-| Set Documents Folder… | Override the folder used to locate document files |
-
-**Set Documents Folder** is useful when the database was created on a different
-machine or the document files have been moved. The application first tries the
-path stored in the database; if the file is not found there it looks for the
-filename inside the documents folder you specify.
+| Exit | Ctrl+Q | Close the application |
 
 ### Toolbar
 
 | Button | Description |
 |---|---|
 | Rebuild Cache | Deletes the caches of all active databases and rebuilds them from scratch (confirmation required) |
+| Close | Close the application (right-hand end of the toolbar) |
 
 ---
 
@@ -240,8 +231,8 @@ into the folder). Each database gets its **own cache file**,
 
 ### Database list
 
-Each database appears with a checkbox, its cache file and its documents
-folder. Only ticked databases are searched. The status icon shows the state
+Each database appears with a checkbox, its cache file, its drive letter and
+its documents folder. Only ticked databases are searched. The status icon shows the state
 of the database's cache:
 
 | Icon | Colour | Meaning |
@@ -255,6 +246,32 @@ of the database's cache:
 is still written to the data folder. Two databases with the same file name
 would share a cache file, so this is refused. **Remove Selected** removes
 external databases; databases inside the data folder are only unticked.
+
+### Finding the documents (drive letter and documents folder)
+
+allmydox stores the full path of every document, usually as a network path
+such as `\\server\share\docs\…`. If that path is not reachable — e.g. on a
+Windows PC where the share is mounted as a drive, or with a copy of the
+documents on another disk — set where each database's documents are:
+
+- **Drive** (double-click the column): a Windows drive letter that replaces
+  the share or drive at the start of the stored path. With `S:`,
+  `\\server\share\docs\x\doc.pdf` is opened as `S:\docs\x\doc.pdf`.
+  The tooltip shows which share the database's paths use. Databases on
+  different shares can use different letters.
+- **Documents Folder** (double-click the column): a folder in which the file
+  is looked up by name only.
+
+When a document is opened, these locations are tried in order:
+
+1. the drive-letter path (if a drive is set) — tried first so an unreachable
+   network share does not stall the app
+2. the path stored in the database
+3. the per-database documents folder
+4. the global documents folder (`--docs`)
+
+Drive letter and documents folder are saved in the database's cache file
+and in the config, and survive a cache rebuild.
 
 ### Building and updating the caches
 

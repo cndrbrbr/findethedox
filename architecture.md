@@ -142,7 +142,7 @@ Settings dialog; without a data folder it is placed next to the database.
 
 Caches are independent: adding, removing or rebuilding one database never
 touches the others. The `meta` table stores `max_file_id` (the watermark),
-`src:<path>` and `docs_folder`. The watermark lookup falls back to a single
+`src:<path>`, `docs_folder` and `docs_drive`. The watermark lookup falls back to a single
 `src:*` row, so a cache still works after the data folder has been moved.
 `cache.cooccurrences()` and `cache.global_frequencies()` take a list of
 connections and sum the scores per `(word, kind)`; each cache contributes its
@@ -231,6 +231,7 @@ _SentenceWorker:
   "external_dbs": ["/elsewhere/third.db"],
   "disabled_dbs": ["/path/to/datafolder/old.db"],
   "db_docs":      {"/path/to/datafolder/first.db": "/path/to/documents"},
+  "db_drives":    {"/path/to/datafolder/first.db": "S:"},
   "docs_folder":  "/path/to/documents"
 }
 ```

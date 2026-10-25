@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QLabel, QListWidget, QListWidgetItem,
     QTreeWidget, QTreeWidgetItem, QHeaderView,
     QSplitter, QStatusBar, QProgressDialog, QFileDialog, QMessageBox,
-    QPushButton,
+    QPushButton, QInputDialog, QSizePolicy,
 )
 
 import cache as cache_mod
@@ -158,6 +158,7 @@ class SetupDialog(QDialog):
                  external_dbs: list[str] | None = None,
                  disabled_dbs: list[str] | None = None,
                  db_docs: dict[str, str] | None = None,
+                 db_drives: dict[str, str] | None = None,
                  parent=None):
         super().__init__(parent)
         self.setWindowTitle("findethedox — Settings")
@@ -169,6 +170,9 @@ class SetupDialog(QDialog):
         self._disabled: set[str] = set(disabled_dbs or [])
         self._db_paths: list[str] = []
         self._db_docs: dict[str, str] = dict(db_docs or {})
+        # Windows drive letter per DB that replaces the share in stored paths
+        self._db_drives: dict[str, str] = dict(db_drives or {})
+        self._shares: dict[str, str] = {}   # db_path → e.g. \\server\share
         self._worker: _CacheWorker | None = None
 
         self._build_ui()
@@ -193,6 +197,9 @@ class SetupDialog(QDialog):
 
     def result_db_docs(self) -> dict[str, str]:
         return {k: v for k, v in self._db_docs.items() if v}
+
+    def result_db_drives(self) -> dict[str, str]:
+        return {k: v for k, v in self._db_drives.items() if v}
 
     def _cache_path(self, db_path: str) -> str:
         return cache_mod.cache_path_for(db_path, self._data_folder or None)
@@ -235,21 +242,22 @@ class SetupDialog(QDialog):
         db_hdr.addWidget(self._add_btn)
         root.addLayout(db_hdr)
 
-        # Database tree (three columns: database, cache file, docs folder)
+        # Database tree: database, cache file, drive letter, docs folder
         self._db_tree = QTreeWidget()
-        self._db_tree.setColumnCount(3)
-        self._db_tree.setHeaderLabels(["Database", "Cache File", "Documents Folder"])
+        self._db_tree.setColumnCount(4)
+        self._db_tree.setHeaderLabels(["Database", "Cache File", "Drive", "Documents Folder"])
         self._db_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._db_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self._db_tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._db_tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._db_tree.header().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self._db_tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self._db_tree.setRootIsDecorated(False)
         self._db_tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
         self._db_tree.itemChanged.connect(self._on_item_changed)
         root.addWidget(self._db_tree, 1)
 
-        docs_hint = QLabel("Tick the databases to search  ·  "
-                           "Double-click the Documents Folder column to set a folder per database")
+        docs_hint = QLabel("Tick the databases to search  ·  Double-click Drive or "
+                           "Documents Folder to set where its documents are found")
         docs_hint.setStyleSheet("color:#888;font-size:10px;")
         root.addWidget(docs_hint)
 
@@ -317,12 +325,21 @@ class SetupDialog(QDialog):
         in_folder = set(found)
         self._external = [p for p in self._external if p not in in_folder]
         self._db_paths = found + self._external
-        # Docs folders: cache meta wins over the passed-in config copy
         for db_path in self._db_paths:
-            stored = cache_mod.get_docs_folder(self._cache_path(db_path), db_path)
-            if stored:
-                self._db_docs[db_path] = stored
+            self._load_db_meta(db_path)
         self._refresh()
+
+    def _load_db_meta(self, db_path: str):
+        """Docs folder and drive: cache meta wins over the passed-in config copy."""
+        cp = self._cache_path(db_path)
+        stored = cache_mod.get_docs_folder(cp, db_path)
+        if stored:
+            self._db_docs[db_path] = stored
+        drive = cache_mod.get_docs_drive(cp)
+        if drive:
+            self._db_drives[db_path] = drive
+        if db_path not in self._shares:
+            self._shares[db_path] = query.share_root(db_path)
 
     def _statuses(self) -> dict[str, str]:
         return {p: cache_mod.status(self._cache_path(p), p) for p in self._db_paths}
@@ -346,8 +363,12 @@ class SetupDialog(QDialog):
             external = db_path in self._external
             label = db_path if external else Path(db_path).name
 
+            drive = self._db_drives.get(db_path, "")
+            share = self._shares.get(db_path, "")
+
             item = QTreeWidgetItem([f"  {icon}  {label}",
-                                    Path(self._cache_path(db_path)).name, docs])
+                                    Path(self._cache_path(db_path)).name,
+                                    drive or "—", docs])
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(0, Qt.CheckState.Unchecked if db_path in self._disabled
                                else Qt.CheckState.Checked)
@@ -355,7 +376,13 @@ class SetupDialog(QDialog):
             item.setToolTip(1, self._cache_path(db_path))
             item.setForeground(0, QColor(color))
             item.setForeground(1, QColor("#888888"))
-            item.setForeground(2, QColor("#e06c75") if (docs and not docs_ok)
+            item.setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
+            item.setForeground(2, QColor("#d4d4d4") if drive else QColor("#888888"))
+            item.setToolTip(2, (f"{share}\\…  →  {drive}\\…" if drive else
+                                f"Documents are stored under {share}\\… — "
+                                "double-click to map that to a drive letter")
+                            if share else "Double-click to set a drive letter")
+            item.setForeground(3, QColor("#e06c75") if (docs and not docs_ok)
                                else QColor("#888888") if not docs
                                else QColor("#d4d4d4"))
             item.setData(0, Qt.ItemDataRole.UserRole, db_path)
@@ -409,9 +436,27 @@ class SetupDialog(QDialog):
         self._refresh_status()
 
     def _on_tree_double_clicked(self, item: QTreeWidgetItem, column: int):
-        if column != 2:
-            return
         db_path = item.data(0, Qt.ItemDataRole.UserRole)
+        if column == 2:
+            self._choose_drive(db_path)
+        elif column == 3:
+            self._choose_docs_folder(db_path)
+
+    def _choose_drive(self, db_path: str):
+        none = "(none)"
+        letters = [none] + [f"{chr(c)}:" for c in range(ord("A"), ord("Z") + 1)]
+        current = self._db_drives.get(db_path, "")
+        share = self._shares.get(db_path, "") or "the stored path"
+        choice, ok = QInputDialog.getItem(
+            self, f"Drive for {Path(db_path).name}",
+            f"Windows drive letter that replaces {share}\nin the stored document paths:",
+            letters, letters.index(current) if current in letters else 0, False,
+        )
+        if ok:
+            self._db_drives[db_path] = "" if choice == none else choice
+            self._refresh()
+
+    def _choose_docs_folder(self, db_path: str):
         current = self._db_docs.get(db_path, "")
         folder = QFileDialog.getExistingDirectory(
             self, f"Documents folder for {Path(db_path).name}",
@@ -452,9 +497,7 @@ class SetupDialog(QDialog):
                 return
         self._external.append(chosen)
         self._db_paths.append(chosen)
-        stored = cache_mod.get_docs_folder(new_cache, chosen)
-        if stored:
-            self._db_docs[chosen] = stored
+        self._load_db_meta(chosen)
         self._refresh()
 
     def _on_remove(self):
@@ -500,10 +543,11 @@ class SetupDialog(QDialog):
         def on_done():
             dlg.close()
             self._add_btn.setEnabled(True)
-            # Docs folders chosen before the cache existed can be stored now
+            # Docs folders / drives chosen before the cache existed can be stored now
             for db_path, cp, _ in jobs:
                 if self._db_docs.get(db_path):
                     cache_mod.set_docs_folder(cp, self._db_docs[db_path])
+                cache_mod.set_docs_drive(cp, self._db_drives.get(db_path, ""))
             self._refresh()
 
         def on_error(msg: str):
@@ -530,6 +574,7 @@ class MainWindow(QMainWindow):
         data_folder: str | None = None,
         docs_folder: str | None = None,
         db_docs: dict[str, str] | None = None,
+        db_drives: dict[str, str] | None = None,
     ):
         super().__init__()
         self.resize(1280, 760)
@@ -544,6 +589,7 @@ class MainWindow(QMainWindow):
             p: cache_mod.cache_path_for(p, data_folder) for p in db_paths
         }
         self._db_docs: dict[str, str] = dict(db_docs or {})
+        self._db_drives: dict[str, str] = dict(db_drives or {})
         self._cache_conns: list = []                       # set after caches are ready
         self._current_word: str = ""
         self._search_worker: _SearchWorker | None = None
@@ -685,6 +731,18 @@ class MainWindow(QMainWindow):
         rebuild_action.setToolTip("Delete the existing cache and rebuild it from scratch")
         rebuild_action.triggered.connect(self._on_rebuild_cache)
 
+        file_menu.addSeparator()
+        exit_action = file_menu.addAction("Exit")
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(spacer)
+        close_action = toolbar.addAction("Close")
+        close_action.setToolTip("Close findethedox (Ctrl+Q)")
+        close_action.triggered.connect(self.close)
+
     def _apply_dark_theme(self):
         self.setStyleSheet("""
             QMainWindow, QWidget { background:#1e1e1e; color:#d4d4d4; }
@@ -723,7 +781,8 @@ class MainWindow(QMainWindow):
         if not chosen:
             return
         new_win = MainWindow([chosen], data_folder=self._data_folder,
-                             docs_folder=self._docs_folder, db_docs=self._db_docs)
+                             docs_folder=self._docs_folder, db_docs=self._db_docs,
+                             db_drives=self._db_drives)
         new_win.show()
         self.close()
 
@@ -740,6 +799,7 @@ class MainWindow(QMainWindow):
             external_dbs=external,
             disabled_dbs=cfg.get("disabled_dbs", []),
             db_docs=self._db_docs,
+            db_drives=self._db_drives,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -747,6 +807,7 @@ class MainWindow(QMainWindow):
         new_db_paths     = dlg.result_db_paths()
         new_data_folder  = dlg.result_data_folder() or None
         new_db_docs      = dlg.result_db_docs()
+        new_db_drives    = dlg.result_db_drives()
         self._close_caches()
         # Persist per-DB docs folders into each database's cache meta table
         for db_path, folder in new_db_docs.items():
@@ -756,12 +817,20 @@ class MainWindow(QMainWindow):
         cfg["data_folder"]  = new_data_folder
         cfg["external_dbs"] = dlg.result_external_dbs()
         cfg["disabled_dbs"] = dlg.result_disabled_dbs()
+        # '' clears a drive that was removed in the dialog
+        for db_path in new_db_paths:
+            cache_mod.set_docs_drive(
+                cache_mod.cache_path_for(db_path, new_data_folder),
+                new_db_drives.get(db_path, ""),
+            )
         cfg["db_docs"]      = new_db_docs
+        cfg["db_drives"]    = new_db_drives
         for legacy in ("db_paths", "db_path", "cache_path", "cache_folder"):
             cfg.pop(legacy, None)
         config_mod.save(cfg)
         new_win = MainWindow(new_db_paths, data_folder=new_data_folder,
-                             docs_folder=self._docs_folder, db_docs=new_db_docs)
+                             docs_folder=self._docs_folder, db_docs=new_db_docs,
+                             db_drives=new_db_drives)
         new_win.show()
         self.close()
 
@@ -799,6 +868,10 @@ class MainWindow(QMainWindow):
                 stored = cache_mod.get_docs_folder(cp, db_path)
                 if stored:
                     self._db_docs[db_path] = stored
+            if not self._db_drives.get(db_path):
+                drive = cache_mod.get_docs_drive(cp)
+                if drive:
+                    self._db_drives[db_path] = drive
         # Existing caches are used as-is; the user can update them in Settings
         missing = [(p, cp, "build") for p, cp in self._cache_paths.items()
                    if cache_mod.status(cp, p) in ("no_cache", "missing")]
@@ -841,6 +914,8 @@ class MainWindow(QMainWindow):
         for db_path, cp, _ in self._cache_jobs:
             if self._db_docs.get(db_path):
                 cache_mod.set_docs_folder(cp, self._db_docs[db_path])
+            if self._db_drives.get(db_path):
+                cache_mod.set_docs_drive(cp, self._db_drives[db_path])
         self._open_caches()
         self._load_global()
 
@@ -853,8 +928,15 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _resolve_filepath(self, occ: query.DocOccurrence) -> Path:
-        """Resolve document path: stored path → per-DB docs folder → global fallback."""
-        filepath = Path(occ.folderpath) / occ.filename
+        """Resolve document path: per-DB drive → stored path → per-DB docs folder
+        → global fallback.  The drive is tried first so an unreachable UNC
+        share is not probed when the user has mapped it to a drive letter."""
+        drive = self._db_drives.get(occ.source_db, "")
+        filepath = None
+        if drive:
+            filepath = Path(query.map_to_drive(occ.folderpath, drive)) / occ.filename
+        if filepath is None or not filepath.exists():
+            filepath = Path(occ.folderpath) / occ.filename
         if not filepath.exists():
             db_folder = self._db_docs.get(occ.source_db, "")
             if db_folder:
