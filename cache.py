@@ -340,6 +340,40 @@ def set_docs_folder(cache_path: str, docs_folder: str):
         pass
 
 
+def get_docs_drive(cache_path: str) -> str:
+    """Return the Windows drive letter (e.g. 'S:') stored in a per-DB cache."""
+    if not Path(cache_path).exists():
+        return ""
+    try:
+        conn = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='docs_drive'"
+        ).fetchone()
+        conn.close()
+        return row[0] if row else ""
+    except Exception:
+        return ""
+
+
+def set_docs_drive(cache_path: str, drive: str):
+    """Store the Windows drive letter in a per-DB cache ('' removes it)."""
+    if not Path(cache_path).exists():
+        return
+    try:
+        conn = sqlite3.connect(cache_path)
+        if drive:
+            conn.execute("""
+                INSERT INTO meta VALUES ('docs_drive', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """, (drive,))
+        else:
+            conn.execute("DELETE FROM meta WHERE key='docs_drive'")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def connect(cache_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
