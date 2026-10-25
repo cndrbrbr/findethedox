@@ -641,6 +641,54 @@ confusing.
 
 ---
 
+## v2.9 — 2026-10-25  One cache file per database; data folder
+
+### Problem
+
+All databases of a session were merged into a single `findethedox.cache.db`.
+Adding or removing a database meant the combined cache no longer matched the
+database set, and databases and caches could be scattered across folders.
+
+### Solution
+
+**One cache per database.** Each source database `<name>.db` now has its own
+cache `<name>.cache.db`. Searches query every active cache and add the scores
+per `(word, kind)` (each cache contributes its top 200 / top 450 rows), so
+results match the combined cache closely, and databases can be added,
+removed or rebuilt independently.
+
+**Data folder.** The Settings dialog has a **Data folder** instead of a cache
+folder. Every allmydox database in it is listed automatically (**Rescan**
+picks up new files), and all cache files are written there. Databases
+outside the folder can still be added with **Add Database…**; their caches
+also go to the data folder. Each database has a checkbox that controls
+whether it is searched. Command line: `--data FOLDER` (replaces `--cache`).
+
+**Docs folders survive rebuilds.** The per-database documents folder is now
+stored as `docs_folder` in that database's cache and is carried over when the
+cache is rebuilt.
+
+### Migration
+
+- Old configs (`db_paths`, `cache_path`) are read as external databases with
+  caches next to each database, so existing `archive.cache.db`-style caches are
+  reused. Choose a data folder in Settings to move to the new layout.
+- An old combined `findethedox.cache.db` is no longer used; the per-database
+  caches are built on the next start (or via **Build Caches**). It can be
+  deleted afterwards. A cache that holds several databases (from older
+  versions) is shown as ✗ and rebuilt for its own database only.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `cache.py` | `cache_path_for()`, `find_databases()`, `status()`; watermark also written as `max_file_id`; `cooccurrences()` / `global_frequencies()` take a list of connections and merge; `get_docs_folder()` / `set_docs_folder()` per cache; `build()` keeps docs folders |
+| `app.py` | `SetupDialog` rewritten around the data folder (checkboxes, cache file column, Rescan); `_CacheWorker` runs a list of `(db, cache, mode)` jobs; `_SearchWorker` queries all caches; `MainWindow` keeps one connection per cache and builds only missing caches on startup |
+| `main.py` | `--data` replaces `--cache`; databases resolved from data folder + `external_dbs` − `disabled_dbs`; legacy config migration |
+| `README.md`, `features.md`, `architecture.md` | Describe data folder and per-database caches |
+
+---
+
 ## v2.8 — 2026-05-17  Fix word clouds shrinking after window resize
 
 ### Problem

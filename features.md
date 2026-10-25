@@ -80,33 +80,35 @@ occurrence of the word and scrolled into view.
 ## Multiple databases
 
 Multiple allmydox databases can be combined into a single search session.
-Co-occurrence scores and word frequencies from all sources are aggregated into
-one shared cache. Document lookups query each source independently and
-deduplicate results before display.
+Each source database has its own cache file; co-occurrence scores and word
+frequencies are summed across the caches at query time. Document lookups
+query each source independently and deduplicate results before display.
 
 ---
 
 ## Cache management
 
 ### Pre-computed cache
-All co-occurrence scores are pre-computed into `findethedox.cache.db` so every
-search is a single indexed SELECT (2–5 ms) instead of a 90-second aggregation.
+All co-occurrence scores are pre-computed into one cache file per database
+(`<name>.cache.db` in the data folder) so every search is one indexed SELECT
+per database (2–5 ms each) instead of a 90-second aggregation.
 
 ### Incremental updates
 Each source database has its own watermark. An update only processes documents
 added since the last build; existing cache data is left intact.
 
-### Databases & Cache dialog
-Accessible via **File > Databases & Cache…** (`Ctrl+Shift+O`). Lets you:
+### Settings dialog
+Accessible via **File > Settings…** (`Ctrl+,`). Lets you:
 
-- Choose the **cache folder** (the file is always named `findethedox.cache.db`)
-- **Add** or **remove** source databases
+- Choose the **data folder** — all allmydox databases in it are listed, and
+  each one's cache `<name>.cache.db` is stored there
+- **Tick** which databases to search; **add** databases from other folders
 - See the **cache status** for each database:
-  - `✓` green — in cache, up to date
-  - `⚠` yellow — in cache, but new documents exist in the source
-  - `✗` red — not yet in the cache
+  - `✓` green — cache up to date
+  - `⚠` yellow — new documents exist in the source
+  - `✗` red — cache file belongs to a different database
   - `—` grey — cache file does not exist yet
-- **Build** or **Update** the cache with a live progress bar
+- **Build** or **Update** the caches with a live progress bar
 - **Apply** — saves the configuration and reopens the main window with the new
   database set
 
@@ -124,7 +126,8 @@ and restored on the next launch. The settings stored are:
 
 | Key | Description |
 |---|---|
-| `db_paths` | List of active source database paths |
-| `cache_path` | Full path to the cache file |
-| `cache_folder` | Folder containing the cache file |
+| `data_folder` | Folder holding the databases and their cache files |
+| `external_dbs` | Databases added from outside the data folder |
+| `disabled_dbs` | Databases that are listed but not searched |
+| `db_docs` | Per-database documents folders |
 | `docs_folder` | Fallback folder for locating document files |
