@@ -21,39 +21,13 @@ import query
 from cloud_widget import CloudWidget
 from doc_viewer import DocViewerDialog
 
-_CACHE_FILENAME = "findethedox.cache.db"
-
-# Status of one source database relative to the cache file
+# Status of one source database relative to its cache file
 _STATUS_DISPLAY = {
     "current":  ("✓", "#4ec94e"),   # green  — in cache, up to date
     "outdated": ("⚠", "#e5c07b"),   # yellow — in cache, new docs available
-    "missing":  ("✗", "#e06c75"),   # red    — not in cache at all
+    "missing":  ("✗", "#e06c75"),   # red    — cache file is not for this DB
     "no_cache": ("—", "#888888"),   # grey   — cache file doesn't exist yet
 }
-
-
-def _cache_db_status(cache_path: str, db_path: str) -> str:
-    if not Path(cache_path).exists():
-        return "no_cache"
-    try:
-        cc = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
-        row = cc.execute(
-            "SELECT value FROM meta WHERE key=?", (f"src:{db_path}",)
-        ).fetchone()
-        cc.close()
-        if row is None:
-            return "missing"
-        last = int(row[0])
-    except Exception:
-        return "missing"
-    try:
-        sc = sqlite3.connect(db_path)
-        row = sc.execute("SELECT MAX(fileID) FROM documents").fetchone()
-        sc.close()
-        cur = int(row[0]) if row and row[0] else 0
-    except Exception:
-        return "missing"
-    return "outdated" if cur > last else "current"
 
 
 # ---------------------------------------------------------------------------
@@ -77,24 +51,29 @@ class _IndexWorker(QThread):
 
 
 class _CacheWorker(QThread):
-    """Builds or updates the pre-computed score cache in the background."""
+    """Builds or updates the per-database score caches in the background."""
     progress = pyqtSignal(str, int, int)   # label, current, total
     done     = pyqtSignal()
     error    = pyqtSignal(str)
 
-    def __init__(self, db_paths: list, cache_path: str, mode: str = "build"):
+    def __init__(self, jobs: list[tuple[str, str, str]]):
+        """jobs: (db_path, cache_path, mode) with mode 'build' or 'update'."""
         super().__init__()
-        self._db_paths   = db_paths
-        self._cache_path = cache_path
-        self._mode       = mode
+        self._jobs = jobs
 
     def run(self):
-        fn = cache_mod.update if self._mode == "update" else cache_mod.build
+        n = len(self._jobs)
         try:
-            fn(
-                self._db_paths, self._cache_path,
-                progress=lambda lbl, cur, tot: self.progress.emit(lbl, cur, tot),
-            )
+            for i, (db_path, cache_path, mode) in enumerate(self._jobs):
+                fn = cache_mod.update if mode == "update" else cache_mod.build
+                prefix = f"[{Path(db_path).name}] " if n > 1 else ""
+
+                def report(lbl, cur, tot, i=i, prefix=prefix):
+                    # Map each job's own progress onto one overall bar
+                    frac = cur / tot if tot else 0
+                    self.progress.emit(prefix + lbl, int((i + frac) * 100), n * 100)
+
+                fn(db_path, cache_path, progress=report)
             self.done.emit()
         except Exception as exc:
             self.error.emit(str(exc))
@@ -107,19 +86,22 @@ class _SearchWorker(QThread):
     not_found  = pyqtSignal(str)
     error      = pyqtSignal(str)
 
-    def __init__(self, db_paths: list, cache_path: str, word: str, docs_only: bool = False):
+    def __init__(self, db_paths: list, cache_paths: list, word: str, docs_only: bool = False):
         super().__init__()
-        self._db_paths   = db_paths
-        self._cache_path = cache_path
+        self._db_paths    = db_paths
+        self._cache_paths = cache_paths
         self._word       = word
         self._docs_only  = docs_only
 
     def run(self):
         try:
             if not self._docs_only:
-                cc = cache_mod.connect(self._cache_path)
-                rows = [dict(r) for r in cache_mod.cooccurrences(cc, self._word)]
-                cc.close()
+                conns = [cache_mod.connect(cp) for cp in self._cache_paths]
+                try:
+                    rows = cache_mod.cooccurrences(conns, self._word)
+                finally:
+                    for cc in conns:
+                        cc.close()
                 if not rows:
                     self.not_found.emit(self._word)
                     return
@@ -164,53 +146,56 @@ class _SentenceWorker(QThread):
 
 
 # ---------------------------------------------------------------------------
-# Setup dialog — databases & cache
+# Setup dialog — data folder, databases & caches
 # ---------------------------------------------------------------------------
 
 class SetupDialog(QDialog):
-    """Configure databases, cache location, and per-database documents folders."""
+    """Configure the data folder, which databases to search, and per-database
+    documents folders.  Every database gets its own cache file
+    (<stem>.cache.db) in the data folder."""
 
-    def __init__(self, db_paths: list[str], cache_path: str,
-                 docs_folder: str = "", db_docs: dict[str, str] | None = None,
+    def __init__(self, data_folder: str = "",
+                 external_dbs: list[str] | None = None,
+                 disabled_dbs: list[str] | None = None,
+                 db_docs: dict[str, str] | None = None,
                  parent=None):
         super().__init__(parent)
         self.setWindowTitle("findethedox — Settings")
         self.resize(820, 560)
 
-        self._db_paths: list[str] = list(db_paths)
-        self._cache_path: str = cache_path
-        self._cache_folder: str = str(Path(cache_path).parent)
-        self._docs_folder: str = docs_folder
+        self._data_folder: str = data_folder
+        # Databases outside the data folder (added via "Add Database…")
+        self._external: list[str] = list(external_dbs or [])
+        self._disabled: set[str] = set(disabled_dbs or [])
+        self._db_paths: list[str] = []
+        self._db_docs: dict[str, str] = dict(db_docs or {})
         self._worker: _CacheWorker | None = None
-
-        # Per-DB docs folders: load from cache meta, then fill gaps from passed-in dict
-        self._db_docs: dict[str, str] = cache_mod.get_docs_folders(self._cache_path)
-        if db_docs:
-            for k, v in db_docs.items():
-                if k not in self._db_docs and v:
-                    self._db_docs[k] = v
 
         self._build_ui()
         self._apply_dark_theme()
-        self._refresh()
+        self._rescan()
 
     # ------------------------------------------------------------------
     # Public accessors
 
     def result_db_paths(self) -> list[str]:
-        return list(self._db_paths)
+        """Databases checked for searching."""
+        return [p for p in self._db_paths if p not in self._disabled]
 
-    def result_cache_path(self) -> str:
-        return self._cache_path
+    def result_data_folder(self) -> str:
+        return self._data_folder
 
-    def result_cache_folder(self) -> str:
-        return self._cache_folder
+    def result_external_dbs(self) -> list[str]:
+        return list(self._external)
 
-    def result_docs_folder(self) -> str:
-        return self._docs_folder
+    def result_disabled_dbs(self) -> list[str]:
+        return sorted(p for p in self._disabled if p in self._db_paths)
 
     def result_db_docs(self) -> dict[str, str]:
         return {k: v for k, v in self._db_docs.items() if v}
+
+    def _cache_path(self, db_path: str) -> str:
+        return cache_mod.cache_path_for(db_path, self._data_folder or None)
 
     # ------------------------------------------------------------------
     # UI
@@ -220,42 +205,51 @@ class SetupDialog(QDialog):
         root.setSpacing(10)
         root.setContentsMargins(16, 16, 16, 16)
 
-        # Cache folder row
-        cache_row = QHBoxLayout()
-        cache_row.addWidget(QLabel("Cache folder:"))
-        self._cache_edit = QLineEdit()
-        self._cache_edit.setReadOnly(True)
-        cache_row.addWidget(self._cache_edit, 1)
+        # Data folder row
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(QLabel("Data folder:"))
+        self._folder_edit = QLineEdit()
+        self._folder_edit.setReadOnly(True)
+        self._folder_edit.setPlaceholderText("Folder containing the databases and their cache files")
+        folder_row.addWidget(self._folder_edit, 1)
         btn_browse = QPushButton("Browse…")
-        btn_browse.clicked.connect(self._on_browse_cache)
-        cache_row.addWidget(btn_browse)
-        root.addLayout(cache_row)
+        btn_browse.clicked.connect(self._on_browse_folder)
+        folder_row.addWidget(btn_browse)
+        btn_rescan = QPushButton("Rescan")
+        btn_rescan.setToolTip("Look for new databases in the data folder")
+        btn_rescan.clicked.connect(self._rescan)
+        folder_row.addWidget(btn_rescan)
+        root.addLayout(folder_row)
 
-        self._cache_file_lbl = QLabel()
-        self._cache_file_lbl.setStyleSheet("color:#888;font-size:11px;margin-left:2px;")
-        root.addWidget(self._cache_file_lbl)
+        self._folder_hint = QLabel()
+        self._folder_hint.setStyleSheet("color:#888;font-size:11px;margin-left:2px;")
+        root.addWidget(self._folder_hint)
 
         # Databases header
         db_hdr = QHBoxLayout()
         db_hdr.addWidget(QLabel("Databases:"))
         db_hdr.addStretch()
         self._add_btn = QPushButton("Add Database…")
+        self._add_btn.setToolTip("Add a database stored outside the data folder")
         self._add_btn.clicked.connect(self._on_add_database)
         db_hdr.addWidget(self._add_btn)
         root.addLayout(db_hdr)
 
-        # Database tree (two columns: path + docs folder)
+        # Database tree (three columns: database, cache file, docs folder)
         self._db_tree = QTreeWidget()
-        self._db_tree.setColumnCount(2)
-        self._db_tree.setHeaderLabels(["Database", "Documents Folder"])
+        self._db_tree.setColumnCount(3)
+        self._db_tree.setHeaderLabels(["Database", "Cache File", "Documents Folder"])
         self._db_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self._db_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._db_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._db_tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._db_tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self._db_tree.setRootIsDecorated(False)
         self._db_tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
+        self._db_tree.itemChanged.connect(self._on_item_changed)
         root.addWidget(self._db_tree, 1)
 
-        docs_hint = QLabel("Double-click the Documents Folder column to set a folder per database")
+        docs_hint = QLabel("Tick the databases to search  ·  "
+                           "Double-click the Documents Folder column to set a folder per database")
         docs_hint.setStyleSheet("color:#888;font-size:10px;")
         root.addWidget(docs_hint)
 
@@ -263,6 +257,8 @@ class SetupDialog(QDialog):
         remove_row = QHBoxLayout()
         remove_row.addStretch()
         self._remove_btn = QPushButton("Remove Selected")
+        self._remove_btn.setToolTip("Remove external databases; databases in the "
+                                    "data folder are only unticked")
         self._remove_btn.clicked.connect(self._on_remove)
         remove_row.addWidget(self._remove_btn)
         root.addLayout(remove_row)
@@ -271,7 +267,7 @@ class SetupDialog(QDialog):
         status_row = QHBoxLayout()
         self._status_lbl = QLabel()
         status_row.addWidget(self._status_lbl, 1)
-        self._update_btn = QPushButton("Build Cache")
+        self._update_btn = QPushButton("Build Caches")
         self._update_btn.clicked.connect(self._on_update_cache)
         status_row.addWidget(self._update_btn)
         root.addLayout(status_row)
@@ -315,71 +311,105 @@ class SetupDialog(QDialog):
     # ------------------------------------------------------------------
     # State
 
-    def _refresh(self):
-        self._cache_edit.setText(self._cache_folder)
-        self._cache_file_lbl.setText(f"  {self._cache_path}")
-        self._db_tree.clear()
-
-        statuses: list[str] = []
+    def _rescan(self):
+        """Rebuild the database list from the data folder plus external DBs."""
+        found = cache_mod.find_databases(self._data_folder) if self._data_folder else []
+        in_folder = set(found)
+        self._external = [p for p in self._external if p not in in_folder]
+        self._db_paths = found + self._external
+        # Docs folders: cache meta wins over the passed-in config copy
         for db_path in self._db_paths:
-            status = _cache_db_status(self._cache_path, db_path)
-            statuses.append(status)
+            stored = cache_mod.get_docs_folder(self._cache_path(db_path), db_path)
+            if stored:
+                self._db_docs[db_path] = stored
+        self._refresh()
+
+    def _statuses(self) -> dict[str, str]:
+        return {p: cache_mod.status(self._cache_path(p), p) for p in self._db_paths}
+
+    def _refresh(self):
+        self._folder_edit.setText(self._data_folder)
+        self._folder_hint.setText(
+            "  Each database gets its own cache file <name>.cache.db in this folder."
+            if self._data_folder else
+            "  No data folder set — cache files are stored next to each database."
+        )
+
+        statuses = self._statuses()
+        self._db_tree.blockSignals(True)
+        self._db_tree.clear()
+        for db_path in self._db_paths:
+            status = statuses[db_path]
             icon, color = _STATUS_DISPLAY[status]
             docs = self._db_docs.get(db_path, "")
             docs_ok = Path(docs).is_dir() if docs else True
+            external = db_path in self._external
+            label = db_path if external else Path(db_path).name
 
-            item = QTreeWidgetItem([f"  {icon}  {db_path}", docs])
+            item = QTreeWidgetItem([f"  {icon}  {label}",
+                                    Path(self._cache_path(db_path)).name, docs])
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.CheckState.Unchecked if db_path in self._disabled
+                               else Qt.CheckState.Checked)
+            item.setToolTip(0, db_path + ("  (outside data folder)" if external else ""))
+            item.setToolTip(1, self._cache_path(db_path))
             item.setForeground(0, QColor(color))
-            item.setForeground(1, QColor("#e06c75") if (docs and not docs_ok)
+            item.setForeground(1, QColor("#888888"))
+            item.setForeground(2, QColor("#e06c75") if (docs and not docs_ok)
                                else QColor("#888888") if not docs
                                else QColor("#d4d4d4"))
             item.setData(0, Qt.ItemDataRole.UserRole, db_path)
             self._db_tree.addTopLevelItem(item)
+        self._db_tree.blockSignals(False)
 
-        no_dbs      = not self._db_paths
-        no_cache    = any(s == "no_cache"  for s in statuses)
-        has_missing = any(s == "missing"   for s in statuses)
-        has_old     = any(s == "outdated"  for s in statuses)
+        self._refresh_status(statuses)
 
-        if no_dbs:
-            self._status_lbl.setText("No databases selected.")
-            self._update_btn.setEnabled(False)
-            self._update_btn.setText("Build Cache")
-        elif no_cache:
-            self._status_lbl.setText("Cache not built yet.")
-            self._update_btn.setEnabled(True)
-            self._update_btn.setText("Build Cache")
-        elif has_missing or has_old:
-            n_ok = statuses.count("current")
+    def _refresh_status(self, statuses: dict[str, str] | None = None):
+        if statuses is None:
+            statuses = self._statuses()
+        active = [statuses[p] for p in self.result_db_paths()]
+        n_ok = active.count("current")
+
+        if not self._db_paths:
             self._status_lbl.setText(
-                f"{n_ok} of {len(statuses)} database(s) up to date in cache."
+                "No databases found — choose a data folder or add a database."
             )
-            self._update_btn.setEnabled(True)
-            self._update_btn.setText("Update Cache")
+        elif not active:
+            self._status_lbl.setText("No database ticked for searching.")
+        elif n_ok == len(active):
+            self._status_lbl.setText(f"All {len(active)} cache(s) up to date.")
         else:
-            self._status_lbl.setText(
-                f"All {len(statuses)} database(s) up to date in cache."
-            )
-            self._update_btn.setEnabled(False)
-            self._update_btn.setText("Update Cache")
+            self._status_lbl.setText(f"{n_ok} of {len(active)} cache(s) up to date.")
 
-        self._apply_btn.setEnabled(not no_dbs)
-        self._remove_btn.setEnabled(not no_dbs)
+        any_built = any(s != "no_cache" for s in active)
+        self._update_btn.setText("Update Caches" if any_built else "Build Caches")
+        self._update_btn.setEnabled(bool(active) and n_ok < len(active))
+        self._apply_btn.setEnabled(bool(active))
+        self._remove_btn.setEnabled(bool(self._db_paths))
 
     # ------------------------------------------------------------------
     # Actions
 
-    def _on_browse_cache(self):
+    def _on_browse_folder(self):
         folder = QFileDialog.getExistingDirectory(
-            self, "Select Cache Folder", self._cache_folder
+            self, "Select Data Folder", self._data_folder or str(Path.home())
         )
         if folder:
-            self._cache_folder = folder
-            self._cache_path = str(Path(folder) / _CACHE_FILENAME)
-            self._refresh()
+            self._data_folder = folder
+            self._rescan()
+
+    def _on_item_changed(self, item: QTreeWidgetItem, column: int):
+        if column != 0:
+            return
+        db_path = item.data(0, Qt.ItemDataRole.UserRole)
+        if item.checkState(0) == Qt.CheckState.Checked:
+            self._disabled.discard(db_path)
+        else:
+            self._disabled.add(db_path)
+        self._refresh_status()
 
     def _on_tree_double_clicked(self, item: QTreeWidgetItem, column: int):
-        if column != 1:
+        if column != 2:
             return
         db_path = item.data(0, Qt.ItemDataRole.UserRole)
         current = self._db_docs.get(db_path, "")
@@ -392,39 +422,67 @@ class SetupDialog(QDialog):
             self._refresh()
 
     def _on_add_database(self):
-        start = (
-            str(Path(self._db_paths[-1]).parent)
-            if self._db_paths else str(Path.home())
+        start = self._data_folder or (
+            str(Path(self._db_paths[-1]).parent) if self._db_paths else str(Path.home())
         )
         chosen, _ = QFileDialog.getOpenFileName(
             self, "Add allmydox Database", start,
             "SQLite databases (*.db);;All files (*)",
         )
-        if chosen and chosen not in self._db_paths:
-            self._db_paths.append(chosen)
-            # If the configured cache doesn't exist yet, look for a legacy
-            # cache next to the database (e.g. sv25.cache.db beside sv25.db)
-            if not Path(self._cache_path).exists():
-                legacy = cache_mod.default_cache_path([chosen])
-                if Path(legacy).exists():
-                    self._cache_path = legacy
-                    self._cache_folder = str(Path(legacy).parent)
+        if not chosen:
+            return
+        chosen = str(Path(chosen).absolute())
+        if cache_mod.is_cache_file(chosen):
+            QMessageBox.warning(self, "Add Database",
+                                "This is a findethedox cache file, not an allmydox database.")
+            return
+        if chosen in self._db_paths:
+            self._disabled.discard(chosen)
             self._refresh()
+            return
+        # Two databases with the same name would share one cache file
+        new_cache = self._cache_path(chosen)
+        for other in self._db_paths:
+            if self._cache_path(other) == new_cache:
+                QMessageBox.warning(
+                    self, "Add Database",
+                    f"{Path(chosen).name} would use the same cache file as\n"
+                    f"{other}.\n\nRename one of the databases first.",
+                )
+                return
+        self._external.append(chosen)
+        self._db_paths.append(chosen)
+        stored = cache_mod.get_docs_folder(new_cache, chosen)
+        if stored:
+            self._db_docs[chosen] = stored
+        self._refresh()
 
     def _on_remove(self):
-        to_remove = {
+        selected = {
             item.data(0, Qt.ItemDataRole.UserRole)
             for item in self._db_tree.selectedItems()
         }
-        self._db_paths = [p for p in self._db_paths if p not in to_remove]
+        removed = selected & set(self._external)
+        self._external = [p for p in self._external if p not in removed]
+        self._db_paths = [p for p in self._db_paths if p not in removed]
+        # Databases inside the data folder cannot be removed, only unticked
+        self._disabled |= selected - removed
         self._refresh()
 
     def _on_update_cache(self):
-        cp = self.result_cache_path()
-        mode = "update" if Path(cp).exists() else "build"
+        jobs: list[tuple[str, str, str]] = []
+        for db_path in self.result_db_paths():
+            cp = self._cache_path(db_path)
+            st = cache_mod.status(cp, db_path)
+            if st == "outdated":
+                jobs.append((db_path, cp, "update"))
+            elif st != "current":
+                jobs.append((db_path, cp, "build"))
+        if not jobs:
+            return
 
         dlg = QProgressDialog("Preparing…", None, 0, 100, self)
-        dlg.setWindowTitle("findethedox — Building cache")
+        dlg.setWindowTitle("findethedox — Building caches")
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
         dlg.setMinimumWidth(520)
         dlg.setValue(0)
@@ -433,15 +491,19 @@ class SetupDialog(QDialog):
         self._update_btn.setEnabled(False)
         self._add_btn.setEnabled(False)
 
-        self._worker = _CacheWorker(self._db_paths, cp, mode)
+        self._worker = _CacheWorker(jobs)
 
         def on_progress(lbl: str, cur: int, tot: int):
-            dlg.setLabelText(f"Step {cur}/{tot}: {lbl}")
+            dlg.setLabelText(lbl)
             dlg.setValue(int(cur / tot * 100) if tot else 0)
 
         def on_done():
             dlg.close()
             self._add_btn.setEnabled(True)
+            # Docs folders chosen before the cache existed can be stored now
+            for db_path, cp, _ in jobs:
+                if self._db_docs.get(db_path):
+                    cache_mod.set_docs_folder(cp, self._db_docs[db_path])
             self._refresh()
 
         def on_error(msg: str):
@@ -465,8 +527,8 @@ class MainWindow(QMainWindow):
     def __init__(
         self,
         db_paths,
+        data_folder: str | None = None,
         docs_folder: str | None = None,
-        cache_path: str | None = None,
         db_docs: dict[str, str] | None = None,
     ):
         super().__init__()
@@ -475,10 +537,14 @@ class MainWindow(QMainWindow):
         if isinstance(db_paths, str):
             db_paths = [db_paths]
         self._db_paths    = db_paths
+        self._data_folder = data_folder
         self._docs_folder = docs_folder
-        self._cache_path  = cache_path or cache_mod.default_cache_path(db_paths)
-        self._db_docs: dict[str, str] = db_docs or {}
-        self._cache_conn  = None                           # set after cache is ready
+        # One cache file per source database
+        self._cache_paths: dict[str, str] = {
+            p: cache_mod.cache_path_for(p, data_folder) for p in db_paths
+        }
+        self._db_docs: dict[str, str] = dict(db_docs or {})
+        self._cache_conns: list = []                       # set after caches are ready
         self._current_word: str = ""
         self._search_worker: _SearchWorker | None = None
         self._sentence_worker: _SentenceWorker | None = None
@@ -656,83 +722,99 @@ class MainWindow(QMainWindow):
         )
         if not chosen:
             return
-        new_win = MainWindow([chosen], docs_folder=self._docs_folder)
+        new_win = MainWindow([chosen], data_folder=self._data_folder,
+                             docs_folder=self._docs_folder, db_docs=self._db_docs)
         new_win.show()
         self.close()
 
     def _on_setup_dialog(self):
+        cfg = config_mod.load()
+        data_folder = self._data_folder or ""
+        in_folder = set(cache_mod.find_databases(data_folder)) if data_folder else set()
+        external = list(dict.fromkeys(
+            [p for p in cfg.get("external_dbs", []) if Path(p).exists()]
+            + [p for p in self._db_paths if p not in in_folder]
+        ))
         dlg = SetupDialog(
-            self._db_paths, self._cache_path,
-            docs_folder=self._docs_folder or "",
+            data_folder,
+            external_dbs=external,
+            disabled_dbs=cfg.get("disabled_dbs", []),
             db_docs=self._db_docs,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        new_db_paths    = dlg.result_db_paths()
-        new_cache_path  = dlg.result_cache_path()
-        new_docs_folder = dlg.result_docs_folder() or None
-        new_db_docs     = dlg.result_db_docs()
-        if self._cache_conn:
-            self._cache_conn.close()
-            self._cache_conn = None
-        # Persist per-DB docs folders into the cache meta table
+        new_db_paths     = dlg.result_db_paths()
+        new_data_folder  = dlg.result_data_folder() or None
+        new_db_docs      = dlg.result_db_docs()
+        self._close_caches()
+        # Persist per-DB docs folders into each database's cache meta table
         for db_path, folder in new_db_docs.items():
-            cache_mod.set_docs_folder(new_cache_path, db_path, folder)
-        cfg = config_mod.load()
-        cfg["db_paths"]     = new_db_paths
-        cfg["cache_path"]   = new_cache_path
-        cfg["cache_folder"] = dlg.result_cache_folder()
-        cfg["docs_folder"]  = new_docs_folder
+            cache_mod.set_docs_folder(
+                cache_mod.cache_path_for(db_path, new_data_folder), folder
+            )
+        cfg["data_folder"]  = new_data_folder
+        cfg["external_dbs"] = dlg.result_external_dbs()
+        cfg["disabled_dbs"] = dlg.result_disabled_dbs()
         cfg["db_docs"]      = new_db_docs
+        for legacy in ("db_paths", "db_path", "cache_path", "cache_folder"):
+            cfg.pop(legacy, None)
         config_mod.save(cfg)
-        new_win = MainWindow(new_db_paths, docs_folder=new_docs_folder,
-                             cache_path=new_cache_path, db_docs=new_db_docs)
+        new_win = MainWindow(new_db_paths, data_folder=new_data_folder,
+                             docs_folder=self._docs_folder, db_docs=new_db_docs)
         new_win.show()
         self.close()
 
     def _on_rebuild_cache(self):
         reply = QMessageBox.question(
-            self, "Rebuild Cache",
-            "This will delete the existing cache and rebuild it from scratch.\n"
+            self, "Rebuild Caches",
+            "This will delete the existing caches and rebuild them from scratch.\n"
             "The operation may take several minutes.\n\nContinue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        if self._cache_conn:
-            self._cache_conn.close()
-            self._cache_conn = None
-        self._start_cache_worker("build")
+        self._close_caches()
+        self._start_cache_worker(
+            [(p, cp, "build") for p, cp in self._cache_paths.items()], rebuild=True
+        )
 
-    def _save_config(self):
-        cfg = config_mod.load()
-        cfg["db_paths"]    = self._db_paths
-        cfg["docs_folder"] = self._docs_folder
-        cfg["cache_path"]  = self._cache_path
-        config_mod.save(cfg)
+    def _close_caches(self):
+        for conn in self._cache_conns:
+            conn.close()
+        self._cache_conns = []
+
+    def _open_caches(self):
+        self._close_caches()
+        self._cache_conns = [cache_mod.connect(cp) for cp in self._cache_paths.values()]
 
     # ------------------------------------------------------------------
     # Startup sequence: indexes → cache → show clouds
     # ------------------------------------------------------------------
 
     def _on_indexes_ready(self):
-        if cache_mod.is_built(self._cache_path):
-            # Cache exists — use it as-is; user can rebuild via the toolbar button
-            if not self._db_docs:
-                self._db_docs = cache_mod.get_docs_folders(self._cache_path)
-            self._cache_conn = cache_mod.connect(self._cache_path)
-            self._load_global()
+        # Fill per-DB docs folders from cache meta where config has none
+        for db_path, cp in self._cache_paths.items():
+            if not self._db_docs.get(db_path):
+                stored = cache_mod.get_docs_folder(cp, db_path)
+                if stored:
+                    self._db_docs[db_path] = stored
+        # Existing caches are used as-is; the user can update them in Settings
+        missing = [(p, cp, "build") for p, cp in self._cache_paths.items()
+                   if cache_mod.status(cp, p) in ("no_cache", "missing")]
+        if missing:
+            self._start_cache_worker(missing)
         else:
-            self._start_cache_worker("build")
+            self._open_caches()
+            self._load_global()
 
-    def _start_cache_worker(self, mode: str):
-        if mode == "update":
-            title = "findethedox — cache update"
-            label = "Updating search cache with new documents…"
+    def _start_cache_worker(self, jobs: list[tuple[str, str, str]], rebuild: bool = False):
+        if rebuild:
+            title = "findethedox — cache rebuild"
+            label = "Rebuilding search caches…"
         else:
             title = "findethedox — first launch"
-            label = "Building search cache — this runs once and takes a few minutes."
+            label = "Building search cache — this runs once per database and takes a few minutes."
 
         self._progress_dlg = QProgressDialog(label, None, 0, 100, self)
         self._progress_dlg.setWindowTitle(title)
@@ -741,7 +823,8 @@ class MainWindow(QMainWindow):
         self._progress_dlg.setValue(0)
         self._progress_dlg.show()
 
-        self._cache_worker = _CacheWorker(self._db_paths, self._cache_path, mode=mode)
+        self._cache_jobs = jobs
+        self._cache_worker = _CacheWorker(jobs)
         self._cache_worker.progress.connect(self._on_cache_progress)
         self._cache_worker.done.connect(self._on_cache_done)
         self._cache_worker.error.connect(self._on_cache_error)
@@ -749,12 +832,16 @@ class MainWindow(QMainWindow):
 
     def _on_cache_progress(self, label: str, current: int, total: int):
         pct = int(current / total * 100) if total else 0
-        self._progress_dlg.setLabelText(f"Step {current}/{total}: {label}")
+        self._progress_dlg.setLabelText(label)
         self._progress_dlg.setValue(pct)
 
     def _on_cache_done(self):
         self._progress_dlg.close()
-        self._cache_conn = cache_mod.connect(self._cache_path)
+        # Docs folders chosen before the cache existed can be stored now
+        for db_path, cp, _ in self._cache_jobs:
+            if self._db_docs.get(db_path):
+                cache_mod.set_docs_folder(cp, self._db_docs[db_path])
+        self._open_caches()
         self._load_global()
 
     def _on_cache_error(self, msg: str):
@@ -805,22 +892,22 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _load_global(self):
-        if self._cache_conn is None:
+        if not self._cache_conns:
             return
         self._status.showMessage("Loading…")
-        rows = cache_mod.global_frequencies(self._cache_conn)
+        rows = cache_mod.global_frequencies(self._cache_conns)
         words = [query.WordScore(r["word"], r["kind"], float(r["freq"])) for r in rows]
         self._update_clouds(words)
         names = ", ".join(Path(p).name for p in self._db_paths)
         self._status.showMessage(f"{names}  —  type a word and press Enter to search", 0)
 
     def _start_search(self, word: str, docs_only: bool = False):
-        if self._cache_conn is None:
+        if not self._cache_conns:
             self._status.showMessage("Cache not ready yet.", 3000)
             return
         self._status.showMessage(f'Searching for "{word}"…')
         self._search_worker = _SearchWorker(
-            self._db_paths, self._cache_path, word, docs_only=docs_only
+            self._db_paths, list(self._cache_paths.values()), word, docs_only=docs_only
         )
         self._search_worker.cooc_ready.connect(self._on_cooc_ready)
         self._search_worker.docs_ready.connect(self._on_docs_ready)
