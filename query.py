@@ -1,7 +1,7 @@
 """All database queries for findethedox."""
 import sqlite3
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 @dataclass
@@ -237,6 +237,30 @@ def document_occurrences(conn: sqlite3.Connection, word: str) -> list[DocOccurre
             seen.add(key)
             unique.append(d)
     return unique
+
+
+# ---------------------------------------------------------------------------
+# Windows drive mapping
+# ---------------------------------------------------------------------------
+
+def share_root(db_path: str) -> str:
+    """Network share or drive of the stored document paths, e.g. '\\\\face\\SV_25'."""
+    try:
+        conn = sqlite3.connect(f"{Path(db_path).absolute().as_uri()}?mode=ro", uri=True)
+        row = conn.execute("SELECT folderpath FROM documents LIMIT 1").fetchone()
+        conn.close()
+    except Exception:
+        return ""
+    return PureWindowsPath(row[0]).drive if row and row[0] else ""
+
+
+def map_to_drive(folderpath: str, drive: str) -> str:
+    """Replace the share (\\\\server\\share) or drive of a stored Windows path
+    with drive, e.g. \\\\face\\SV_25\\sv_2025\\x → S:\\sv_2025\\x."""
+    p = PureWindowsPath(folderpath)
+    if not p.drive:
+        return folderpath
+    return str(PureWindowsPath(drive + "\\") / p.relative_to(p.anchor))
 
 
 # ---------------------------------------------------------------------------

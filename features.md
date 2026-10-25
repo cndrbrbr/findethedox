@@ -103,6 +103,9 @@ Accessible via **File > Settings…** (`Ctrl+,`). Lets you:
 - Choose the **data folder** — all allmydox databases in it are listed, and
   each one's cache `<name>.cache.db` is stored there
 - **Tick** which databases to search; **add** databases from other folders
+- Set a **Windows drive letter** per database that replaces the network share
+  (`\\server\share`) in the stored document paths, and/or a
+  **documents folder** in which files are looked up by name
 - See the **cache status** for each database:
   - `✓` green — cache up to date
   - `⚠` yellow — new documents exist in the source
@@ -130,4 +133,5 @@ and restored on the next launch. The settings stored are:
 | `external_dbs` | Databases added from outside the data folder |
 | `disabled_dbs` | Databases that are listed but not searched |
 | `db_docs` | Per-database documents folders |
+| `db_drives` | Per-database Windows drive letters for document paths |
 | `docs_folder` | Fallback folder for locating document files |
