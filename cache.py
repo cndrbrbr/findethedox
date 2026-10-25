@@ -2,7 +2,8 @@
 Pre-compute all co-occurrence scores into a flat SQLite cache.
 Build once (~5 min for large DBs), then every search is a single indexed SELECT.
 Subsequent runs only process documents added since the last build/update.
-Multiple source databases are supported: pass a list of paths to build/update.
+Each source database has its own cache file (<stem>.cache.db) in the data
+folder; searches query all caches and merge the scores.
 """
 import os
 import sqlite3
@@ -21,35 +22,92 @@ def default_cache_path(db_paths) -> str:
     return str(Path(_norm(db_paths)[0]).with_suffix("")) + ".cache.db"
 
 
+def cache_path_for(db_path: str, data_folder: str | None = None) -> str:
+    """Cache file for one source DB: <data_folder>/<stem>.cache.db,
+    or next to the DB when no data folder is set."""
+    folder = Path(data_folder) if data_folder else Path(db_path).parent
+    return str(folder / (Path(db_path).stem + ".cache.db"))
+
+
+def is_cache_file(path) -> bool:
+    return Path(path).name.endswith(".cache.db")
+
+
+def find_databases(folder: str) -> list[str]:
+    """Return all allmydox source DBs (*.db with a documents table) in folder."""
+    found: list[str] = []
+    try:
+        candidates = sorted(Path(folder).glob("*.db"))
+    except OSError:
+        return found
+    for p in candidates:
+        if is_cache_file(p) or not p.is_file():
+            continue
+        try:
+            conn = sqlite3.connect(f"{p.resolve().as_uri()}?mode=ro", uri=True)
+            ok = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='documents'"
+            ).fetchone()
+            conn.close()
+        except Exception:
+            ok = None
+        if ok:
+            found.append(str(p.absolute()))
+    return found
+
+
 def is_built(cache_path: str) -> bool:
     return Path(cache_path).exists()
 
 
-def needs_update(cache_path: str, db_paths) -> bool:
-    """Return True if any source DB has documents not yet in the cache."""
-    for db_path in _norm(db_paths):
-        try:
-            cc = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
-            row = cc.execute("SELECT value FROM meta WHERE key=?",
-                             (f"src:{db_path}",)).fetchone()
-            if row is None:   # legacy single-source cache
-                row = cc.execute(
-                    "SELECT value FROM meta WHERE key='max_file_id'"
-                ).fetchone()
-            cc.close()
-            last = int(row[0]) if row else 0
-        except Exception:
-            return False
-        try:
-            sc = sqlite3.connect(db_path)
-            row = sc.execute("SELECT MAX(fileID) FROM documents").fetchone()
-            sc.close()
-            cur = int(row[0]) if row and row[0] else 0
-        except Exception:
-            return False
-        if cur > last:
-            return True
-    return False
+def _watermark(conn: sqlite3.Connection, db_path: str) -> int | None:
+    """Max fileID already in the cache for db_path, or None if not present."""
+    row = conn.execute("SELECT value FROM meta WHERE key=?",
+                       (f"src:{db_path}",)).fetchone()
+    if row is None:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='max_file_id'"
+        ).fetchone()
+    if row is None:
+        # Single-source cache created under a different path (folder moved)
+        rows = conn.execute(
+            "SELECT value FROM meta WHERE key LIKE 'src:%'"
+        ).fetchall()
+        if len(rows) == 1:
+            row = rows[0]
+    return int(row[0]) if row else None
+
+
+def _source_max(db_path: str) -> int:
+    sc = sqlite3.connect(db_path)
+    row = sc.execute("SELECT MAX(fileID) FROM documents").fetchone()
+    sc.close()
+    return int(row[0]) if row and row[0] else 0
+
+
+def status(cache_path: str, db_path: str) -> str:
+    """'no_cache', 'missing', 'outdated' or 'current' for one source DB."""
+    if not Path(cache_path).exists():
+        return "no_cache"
+    try:
+        cc = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
+        n_src = cc.execute(
+            "SELECT COUNT(*) FROM meta WHERE key LIKE 'src:%'"
+        ).fetchone()[0]
+        # Old combined cache holding several databases → needs its own rebuild
+        last = _watermark(cc, db_path) if n_src <= 1 else None
+        cc.close()
+        if last is None:
+            return "missing"
+        cur = _source_max(db_path)
+    except Exception:
+        return "missing"
+    return "outdated" if cur > last else "current"
+
+
+def needs_update(cache_path: str, db_path: str) -> bool:
+    """Return True if the source DB has documents not yet in its cache."""
+    return status(cache_path, db_path) in ("missing", "outdated")
 
 
 def build(db_paths, cache_path: str, progress: ProgressFn | None = None):
@@ -62,7 +120,17 @@ def build(db_paths, cache_path: str, progress: ProgressFn | None = None):
     """
     paths = _norm(db_paths)
 
+    # Keep per-DB documents folders across a rebuild
+    kept_docs: list[tuple[str, str]] = []
     if os.path.exists(cache_path):
+        try:
+            old = sqlite3.connect(cache_path)
+            kept_docs = old.execute(
+                "SELECT key, value FROM meta WHERE key LIKE 'docs%'"
+            ).fetchall()
+            old.close()
+        except Exception:
+            pass
         os.remove(cache_path)
 
     conn = sqlite3.connect(cache_path)
@@ -126,6 +194,10 @@ def build(db_paths, cache_path: str, progress: ProgressFn | None = None):
     for db_path, max_id in source_maxes.items():
         conn.execute("INSERT INTO meta VALUES (?, ?)",
                      (f"src:{db_path}", str(max_id)))
+    if len(source_maxes) == 1:
+        conn.execute("INSERT INTO meta VALUES ('max_file_id', ?)",
+                     (str(next(iter(source_maxes.values()))),))
+    conn.executemany("INSERT OR REPLACE INTO meta VALUES (?, ?)", kept_docs)
     conn.commit()
     conn.close()
 
@@ -146,13 +218,7 @@ def update(db_paths, cache_path: str, progress: ProgressFn | None = None):
     sources_to_update: list[tuple[str, int, int]] = []
     for db_path in paths:
         try:
-            row = conn.execute("SELECT value FROM meta WHERE key=?",
-                               (f"src:{db_path}",)).fetchone()
-            if row is None:
-                row = conn.execute(
-                    "SELECT value FROM meta WHERE key='max_file_id'"
-                ).fetchone()
-            last = int(row[0]) if row else 0
+            last = _watermark(conn, db_path) or 0
         except Exception:
             last = 0
         try:
@@ -222,6 +288,11 @@ def update(db_paths, cache_path: str, progress: ProgressFn | None = None):
             INSERT INTO meta VALUES (?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """, (f"src:{db_path}", str(cur_max)))
+        if len(paths) == 1:
+            conn.execute("""
+                INSERT INTO meta VALUES ('max_file_id', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """, (str(cur_max),))
         conn.commit()
         conn.execute("DETACH DATABASE src")
         offset += n_steps + 1
@@ -235,31 +306,34 @@ def update(db_paths, cache_path: str, progress: ProgressFn | None = None):
 # Cached query functions
 # ---------------------------------------------------------------------------
 
-def get_docs_folders(cache_path: str) -> dict[str, str]:
-    """Return {db_path: docs_folder} stored in cache meta (keys 'docs:<path>')."""
+def get_docs_folder(cache_path: str, db_path: str) -> str:
+    """Return the documents folder stored in a per-DB cache ('' if unset)."""
     if not Path(cache_path).exists():
-        return {}
+        return ""
     try:
         conn = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
-        rows = conn.execute(
-            "SELECT key, value FROM meta WHERE key LIKE 'docs:%'"
-        ).fetchall()
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='docs_folder'"
+        ).fetchone()
+        if row is None:   # older combined cache: 'docs:<path>' keys
+            row = conn.execute("SELECT value FROM meta WHERE key=?",
+                               (f"docs:{db_path}",)).fetchone()
         conn.close()
-        return {row[0][5:]: row[1] for row in rows}
+        return row[0] if row else ""
     except Exception:
-        return {}
+        return ""
 
 
-def set_docs_folder(cache_path: str, db_path: str, docs_folder: str):
-    """Store or update the documents folder for a source DB in cache meta."""
+def set_docs_folder(cache_path: str, docs_folder: str):
+    """Store or update the documents folder in a per-DB cache's meta table."""
     if not Path(cache_path).exists():
         return
     try:
         conn = sqlite3.connect(cache_path)
         conn.execute("""
-            INSERT INTO meta VALUES (?, ?)
+            INSERT INTO meta VALUES ('docs_folder', ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
-        """, (f"docs:{db_path}", docs_folder))
+        """, (docs_folder,))
         conn.commit()
         conn.close()
     except Exception:
@@ -272,24 +346,39 @@ def connect(cache_path: str) -> sqlite3.Connection:
     return conn
 
 
-def cooccurrences(conn: sqlite3.Connection, word: str) -> list:
-    """Return rows (tgt_word, tgt_kind, score) ordered by score desc."""
-    return conn.execute("""
+def _merge(results, key_cols: tuple[str, str], val_col: str, limit: int) -> list[dict]:
+    """Sum val_col over identical (word, kind) keys from several caches."""
+    totals: dict[tuple, float] = {}
+    for rows in results:
+        for r in rows:
+            k = (r[key_cols[0]], r[key_cols[1]])
+            totals[k] = totals.get(k, 0) + r[val_col]
+    merged = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    return [{key_cols[0]: w, key_cols[1]: kind, val_col: v}
+            for (w, kind), v in merged]
+
+
+def cooccurrences(conns: list[sqlite3.Connection], word: str) -> list[dict]:
+    """Return dicts (tgt_word, tgt_kind, score) ordered by score desc,
+    summed over all caches."""
+    return _merge((c.execute("""
         SELECT tgt_word, tgt_kind, SUM(score) AS score
         FROM cooccurrence
         WHERE lower(src_word) = ?
         GROUP BY tgt_word, tgt_kind
         ORDER BY score DESC
         LIMIT 200
-    """, (word.lower(),)).fetchall()
+    """, (word.lower(),)).fetchall() for c in conns),
+        ("tgt_word", "tgt_kind"), "score", 200)
 
 
-def global_frequencies(conn: sqlite3.Connection) -> list:
-    """Return rows (word, kind, freq) for the most frequent words."""
-    return conn.execute("""
+def global_frequencies(conns: list[sqlite3.Connection]) -> list[dict]:
+    """Return dicts (word, kind, freq) for the most frequent words across caches."""
+    return _merge((c.execute("""
         SELECT word, kind, freq FROM word_freq
         ORDER BY freq DESC LIMIT 450
-    """).fetchall()
+    """).fetchall() for c in conns),
+        ("word", "kind"), "freq", 450)
 
 
 # ---------------------------------------------------------------------------
