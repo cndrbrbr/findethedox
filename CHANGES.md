@@ -641,6 +641,45 @@ confusing.
 
 ---
 
+## v2.10 — 2026-10-25  Drive letter per database; Close button
+
+### Drive letter per database
+
+allmydox stores document paths as network paths (all current databases use
+`\\face\SV_25\…` or `\\face\SV_pre\…`). On a Windows PC where the share is
+mounted as a drive, those paths could only be found via a documents folder,
+which matches by file name alone.
+
+The Settings dialog has a new **Drive** column. Double-clicking it picks a
+letter (`A:`–`Z:` or none); the tooltip shows the share the database's paths
+use. The letter replaces the share or drive at the start of each stored path,
+so `\\face\SV_25\sv_2025\x\doc.pdf` becomes `S:\sv_2025\x\doc.pdf`.
+
+Lookup order when opening a document: drive-letter path → stored path →
+per-DB documents folder → global documents folder. The drive path is tried
+first because probing an unreachable UNC share can block for seconds on
+Windows.
+
+The letter is stored as `docs_drive` in the database's cache meta table
+(kept across rebuilds) and as `db_drives` in the config.
+
+### Close button
+
+A **Close** button at the right end of the toolbar and **File > Exit**
+(`Ctrl+Q`) close the application.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `query.py` | `share_root()` — share/drive of a DB's stored paths; `map_to_drive()` — replaces it with a drive letter |
+| `cache.py` | `get_docs_drive()` / `set_docs_drive()` |
+| `app.py` | `SetupDialog`: Drive column with letter picker and share tooltip, `result_db_drives()`; `MainWindow`: `db_drives`, drive-first `_resolve_filepath()`, Close toolbar button, File > Exit |
+| `main.py` | Reads/saves `db_drives` |
+| `README.md`, `features.md`, `architecture.md` | Document drive letters, lookup order and Close |
+
+---
+
 ## v2.9 — 2026-10-25  One cache file per database; data folder
 
 ### Problem

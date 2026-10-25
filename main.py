@@ -56,10 +56,12 @@ def main():
 
     docs_folder: str | None = args.docs or cfg.get("docs_folder") or None
     db_docs: dict[str, str] = cfg.get("db_docs") or {}
+    db_drives: dict[str, str] = cfg.get("db_drives") or {}
 
     if not db_paths:
         dlg = SetupDialog(data_folder or "", external_dbs=external,
-                          disabled_dbs=sorted(disabled), db_docs=db_docs)
+                          disabled_dbs=sorted(disabled), db_docs=db_docs,
+                          db_drives=db_drives)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             sys.exit(0)
         db_paths = dlg.result_db_paths()
@@ -67,18 +69,21 @@ def main():
             sys.exit(0)
         data_folder = dlg.result_data_folder() or None
         db_docs = dlg.result_db_docs()
+        db_drives = dlg.result_db_drives()
         cfg.update({
             "data_folder":  data_folder,
             "external_dbs": dlg.result_external_dbs(),
             "disabled_dbs": dlg.result_disabled_dbs(),
             "db_docs":      db_docs,
+            "db_drives":    db_drives,
         })
         for legacy in ("db_paths", "db_path", "cache_path", "cache_folder"):
             cfg.pop(legacy, None)
         config_mod.save(cfg)
 
     window = MainWindow(db_paths, data_folder=data_folder,
-                        docs_folder=docs_folder, db_docs=db_docs)
+                        docs_folder=docs_folder, db_docs=db_docs,
+                        db_drives=db_drives)
     window.show()
     sys.exit(app.exec())
 
