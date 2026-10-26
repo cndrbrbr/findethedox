@@ -225,8 +225,8 @@ _SearchWorker (search text has two words):
 The pair tables store `(occ1, occ2)` in text order, so both directions are
 queried. Each query starts from w1's occurrences (materialized CTE), follows
 the `occ1`/`occ2` index into the pair table, and checks w2's occurrences via
-an automatic index (`CROSS JOIN` fixes this order). On `sv_bibliothek`
-(5.2 M sentence pairs) a pair takes 0.1–0.4 s.
+an automatic index (`CROSS JOIN` fixes this order). On a database with
+5.2 M sentence pairs a pair takes 0.1–0.4 s.
 
 ### Codes (allmydox v1.8+)
 Source DBs may contain `codes`, `code_occurrences`, `code_sentence` and

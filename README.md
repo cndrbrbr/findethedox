@@ -274,8 +274,8 @@ live and which databases are searched.
 Select the folder that holds your allmydox databases. Every allmydox `.db`
 file in it is listed automatically (click **Rescan** after copying new files
 into the folder). Each database gets its **own cache file**,
-`<name>.cache.db`, stored in the same folder — e.g. `sv25.db` →
-`sv25.cache.db`.
+`<name>.cache.db`, stored in the same folder — e.g. `archive.db` →
+`archive.cache.db`.
 
 ### Database list
 
@@ -298,13 +298,13 @@ external databases; databases inside the data folder are only unticked.
 ### Finding the documents (drive letter and documents folder)
 
 allmydox stores the full path of every document, usually as a network path
-such as `\\face\SV_25\sv_2025\…`. If that path is not reachable — e.g. on a
+such as `\\server\share\docs\…`. If that path is not reachable — e.g. on a
 Windows PC where the share is mounted as a drive, or with a copy of the
 documents on another disk — set where each database's documents are:
 
 - **Drive** (double-click the column): a Windows drive letter that replaces
   the share or drive at the start of the stored path. With `S:`,
-  `\\face\SV_25\sv_2025\x\doc.pdf` is opened as `S:\sv_2025\x\doc.pdf`.
+  `\\server\share\docs\x\doc.pdf` is opened as `S:\docs\x\doc.pdf`.
   The tooltip shows which share the database's paths use. Databases on
   different shares can use different letters.
 - **Documents Folder** (double-click the column): a folder in which the file

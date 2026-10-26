@@ -696,8 +696,8 @@ level, so verb + verb has no hits.
 
 The first query version used a correlated `IN` subquery that SQLite
 re-evaluated per row (75–195 s, and too few hits). It now uses
-materialized CTEs with a fixed `CROSS JOIN` order: 0.1–0.4 s on
-`sv_bibliothek`. Results were checked against a brute-force count.
+materialized CTEs with a fixed `CROSS JOIN` order: 0.1–0.4 s on a
+database with 5.2 M sentence pairs. Results were checked against a brute-force count.
 
 ### Files changed
 
@@ -715,15 +715,15 @@ materialized CTEs with a fixed `CROSS JOIN` order: 0.1–0.4 s on
 
 ### Drive letter per database
 
-allmydox stores document paths as network paths (all current databases use
-`\\face\SV_25\…` or `\\face\SV_pre\…`). On a Windows PC where the share is
+allmydox stores document paths as network paths (e.g.
+`\\server\share\…`). On a Windows PC where the share is
 mounted as a drive, those paths could only be found via a documents folder,
 which matches by file name alone.
 
 The Settings dialog has a new **Drive** column. Double-clicking it picks a
 letter (`A:`–`Z:` or none); the tooltip shows the share the database's paths
 use. The letter replaces the share or drive at the start of each stored path,
-so `\\face\SV_25\sv_2025\x\doc.pdf` becomes `S:\sv_2025\x\doc.pdf`.
+so `\\server\share\docs\x\doc.pdf` becomes `S:\docs\x\doc.pdf`.
 
 Lookup order when opening a document: drive-letter path → stored path →
 per-DB documents folder → global documents folder. The drive path is tried
@@ -780,7 +780,7 @@ cache is rebuilt.
 ### Migration
 
 - Old configs (`db_paths`, `cache_path`) are read as external databases with
-  caches next to each database, so existing `sv25.cache.db`-style caches are
+  caches next to each database, so existing `archive.cache.db`-style caches are
   reused. Choose a data folder in Settings to move to the new layout.
 - An old combined `findethedox.cache.db` is no longer used; the per-database
   caches are built on the next start (or via **Build Caches**). It can be
@@ -931,7 +931,7 @@ sentence list.
 When the Settings dialog opened with no databases configured (first launch),
 the default cache path was set to `<folder>/findethedox.cache.db`. If the user
 then added a database that already had a cache built under the old naming
-convention (e.g. `sv25.cache.db` next to `sv25.db`), the dialog did not find
+convention (e.g. `archive.cache.db` next to `archive.db`), the dialog did not find
 it and showed "no cache" — even though a valid, complete cache was sitting
 right next to the database file.
 

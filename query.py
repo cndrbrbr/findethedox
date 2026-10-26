@@ -398,7 +398,7 @@ def pair_occurrences(conn: sqlite3.Connection, word1: str, word2: str) -> list[D
 # ---------------------------------------------------------------------------
 
 def share_root(db_path: str) -> str:
-    """Network share or drive of the stored document paths, e.g. '\\\\face\\SV_25'."""
+    """Network share or drive of the stored document paths, e.g. '\\\\server\\share'."""
     try:
         conn = sqlite3.connect(f"{Path(db_path).absolute().as_uri()}?mode=ro", uri=True)
         row = conn.execute("SELECT folderpath FROM documents LIMIT 1").fetchone()
@@ -410,7 +410,7 @@ def share_root(db_path: str) -> str:
 
 def map_to_drive(folderpath: str, drive: str) -> str:
     """Replace the share (\\\\server\\share) or drive of a stored Windows path
-    with drive, e.g. \\\\face\\SV_25\\sv_2025\\x → S:\\sv_2025\\x."""
+    with drive, e.g. \\\\server\\share\\docs\\x → S:\\docs\\x."""
     p = PureWindowsPath(folderpath)
     if not p.drive:
         return folderpath
