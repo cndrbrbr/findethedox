@@ -26,8 +26,18 @@ _STATUS_DISPLAY = {
     "current":  ("✓", "#4ec94e"),   # green  — in cache, up to date
     "outdated": ("⚠", "#e5c07b"),   # yellow — in cache, new docs available
     "missing":  ("✗", "#e06c75"),   # red    — cache file is not for this DB
+    "rebuild":  ("↻", "#e5c07b"),   # yellow — DB has codes, cache built without
     "no_cache": ("—", "#888888"),   # grey   — cache file doesn't exist yet
 }
+
+
+def search_words(text: str) -> list[str]:
+    """Split the search text into words; the same word twice counts once."""
+    words: list[str] = []
+    for w in text.split():
+        if w.lower() not in (x.lower() for x in words):
+            words.append(w)
+    return words
 
 
 # ---------------------------------------------------------------------------
@@ -92,32 +102,47 @@ class _SearchWorker(QThread):
         self._cache_paths = cache_paths
         self._word       = word
         self._docs_only  = docs_only
+        # Two words → documents where both occur in one sentence or paragraph
+        self._pair = search_words(word) if len(search_words(word)) == 2 else None
 
     def run(self):
         try:
             if not self._docs_only:
                 conns = [cache_mod.connect(cp) for cp in self._cache_paths]
                 try:
-                    rows = cache_mod.cooccurrences(conns, self._word)
+                    if self._pair:
+                        rows = cache_mod.pair_cooccurrences(conns, *self._pair)
+                    else:
+                        rows = cache_mod.cooccurrences(conns, self._word)
                 finally:
                     for cc in conns:
                         cc.close()
-                if not rows:
+                if rows:
+                    self.cooc_ready.emit(rows, self._word)
+                elif not self._pair:
                     self.not_found.emit(self._word)
                     return
-                self.cooc_ready.emit(rows, self._word)
+                else:
+                    # Clouds stay as they are; the pair can still have hits
+                    self.not_found.emit(self._word)
 
             occs: list[query.DocOccurrence] = []
             for db_path in self._db_paths:
                 dc = query.connect(db_path)
-                for occ in query.document_occurrences(dc, self._word):
+                found = (query.pair_occurrences(dc, *self._pair) if self._pair
+                         else query.document_occurrences(dc, self._word))
+                for occ in found:
                     occ.source_db = db_path
                     occs.append(occ)
                 dc.close()
             # Deduplicate across sources
+            if self._pair:
+                order = lambda o: (-o.sentence_hits, -o.paragraph_hits, o.filename)
+            else:
+                order = lambda o: (o.filename, o.pagenumber)
             seen: set[tuple] = set()
             unique: list[query.DocOccurrence] = []
-            for occ in sorted(occs, key=lambda o: (o.filename, o.pagenumber)):
+            for occ in sorted(occs, key=order):
                 key = (occ.filename, occ.folderpath, occ.pagenumber)
                 if key not in seen:
                     seen.add(key)
@@ -128,7 +153,8 @@ class _SearchWorker(QThread):
 
 
 class _SentenceWorker(QThread):
-    """Extracts sentences containing the search word from a document file."""
+    """Extracts sentences containing the search word(s) from a document file.
+    Emits (text, page, kind) with kind 'sentence' or 'paragraph'."""
     ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -139,8 +165,13 @@ class _SentenceWorker(QThread):
 
     def run(self):
         try:
-            from doc_viewer import sentences_containing
-            self.ready.emit(sentences_containing(self._filepath, self._word))
+            from doc_viewer import contexts_containing, sentences_containing
+            words = search_words(self._word)
+            if len(words) == 2:
+                self.ready.emit(contexts_containing(self._filepath, words))
+            else:
+                self.ready.emit([(s, page, "sentence") for s, page in
+                                 sentences_containing(self._filepath, self._word)])
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -372,7 +403,9 @@ class SetupDialog(QDialog):
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(0, Qt.CheckState.Unchecked if db_path in self._disabled
                                else Qt.CheckState.Checked)
-            item.setToolTip(0, db_path + ("  (outside data folder)" if external else ""))
+            item.setToolTip(0, db_path + ("  (outside data folder)" if external else "")
+                            + ("\nIndexed with codes — the cache predates them and is rebuilt"
+                               if status == "rebuild" else ""))
             item.setToolTip(1, self._cache_path(db_path))
             item.setForeground(0, QColor(color))
             item.setForeground(1, QColor("#888888"))
@@ -625,7 +658,9 @@ class MainWindow(QMainWindow):
         search_row = QHBoxLayout()
         search_row.addWidget(QLabel("Search:"))
         self._search = QLineEdit()
-        self._search.setPlaceholderText("Type a noun, name, or verb and press Enter…")
+        self._search.setPlaceholderText(
+            "Type a noun, name or verb — or two words to find them together — and press Enter…"
+        )
         self._search.returnPressed.connect(self._on_search)
         self._search.textChanged.connect(self._on_text_changed)
         search_row.addWidget(self._search)
@@ -633,10 +668,12 @@ class MainWindow(QMainWindow):
 
         clouds_row = QHBoxLayout()
         self._clouds: dict[str, CloudWidget] = {}
-        for kind in ("name", "noun", "verb"):
+        for kind in ("name", "noun", "verb", "code"):
             cw = CloudWidget(kind, self._on_left_click, self._on_right_click)
             self._clouds[kind] = cw
             clouds_row.addWidget(cw)
+        # Shown once a cache with codes (numbers, IDs) is open
+        self._clouds["code"].setVisible(False)
         left_layout.addLayout(clouds_row)
 
         right = QWidget()
@@ -856,6 +893,7 @@ class MainWindow(QMainWindow):
     def _open_caches(self):
         self._close_caches()
         self._cache_conns = [cache_mod.connect(cp) for cp in self._cache_paths.values()]
+        self._clouds["code"].setVisible(cache_mod.has_codes(self._cache_conns))
 
     # ------------------------------------------------------------------
     # Startup sequence: indexes → cache → show clouds
@@ -874,7 +912,7 @@ class MainWindow(QMainWindow):
                     self._db_drives[db_path] = drive
         # Existing caches are used as-is; the user can update them in Settings
         missing = [(p, cp, "build") for p, cp in self._cache_paths.items()
-                   if cache_mod.status(cp, p) in ("no_cache", "missing")]
+                   if cache_mod.status(cp, p) in ("no_cache", "missing", "rebuild")]
         if missing:
             self._start_cache_worker(missing)
         else:
@@ -950,9 +988,11 @@ class MainWindow(QMainWindow):
             self._load_global()
 
     def _on_search(self):
-        word = self._search.text().strip()
+        word = " ".join(search_words(self._search.text()))
         if not word:
             self._load_global()
+        elif len(search_words(word)) > 2:
+            self._status.showMessage("Search for one word, or two words to find them together.", 5000)
         else:
             self._start_search(word)
 
@@ -1006,21 +1046,36 @@ class MainWindow(QMainWindow):
         self._update_clouds(words)
         total = sum(r["score"] for r in rows)
         self._status.showMessage(
-            f'"{word}" — {len(rows)} related words, total score {total:,.0f}', 0
+            f'{self._quoted(word)} — {len(rows)} related words, total score {total:,.0f}', 0
         )
+
+    @staticmethod
+    def _quoted(word: str) -> str:
+        """'"a"' for one word, '"a" + "b"' for a pair."""
+        return " + ".join(f'"{w}"' for w in search_words(word))
 
     def _on_docs_ready(self, occs: list, word: str):
         self._current_word = word
+        pair = len(search_words(word)) == 2
         self._doc_list.clear()
         seen: set[str] = set()
         for occ in occs:
             key = f"{occ.folderpath}/{occ.filename}"
             if key not in seen:
                 seen.add(key)
-                item = QListWidgetItem(f"{occ.filename}  (p.{occ.pagenumber})")
+                label = f"{occ.filename}  (p.{occ.pagenumber})"
+                if pair:
+                    label += f"\n    {occ.sentence_hits} in sentence · {occ.paragraph_hits} in paragraph"
+                item = QListWidgetItem(label)
+                item.setToolTip(f"{occ.folderpath}\\{occ.filename}")
                 item.setData(Qt.ItemDataRole.UserRole, occ)
                 self._doc_list.addItem(item)
-        self._doc_title.setText(f'"{word}" in {self._doc_list.count()} document(s)')
+        if pair:
+            self._doc_title.setText(
+                f"{self._quoted(word)} together in {self._doc_list.count()} document(s)"
+            )
+        else:
+            self._doc_title.setText(f'"{word}" in {self._doc_list.count()} document(s)')
 
         # Reset sentence panel for the new search
         self._sent_list.clear()
@@ -1064,13 +1119,23 @@ class MainWindow(QMainWindow):
 
     def _on_sentences_ready(self, sentences: list):
         self._sent_list.clear()
-        self._sent_title.setText(
-            f'"{self._current_word}" — {len(sentences)} sentence(s)'
-        )
-        for s, page in sentences:
+        n_sent = sum(1 for *_, kind in sentences if kind == "sentence")
+        n_para = len(sentences) - n_sent
+        title = f"{self._quoted(self._current_word)} — {n_sent} sentence(s)"
+        if len(search_words(self._current_word)) == 2:
+            title += f", {n_para} paragraph(s)"
+        self._sent_title.setText(title)
+        for s, page, kind in sentences:
             display = s if len(s) <= 300 else s[:300] + "…"
-            item = QListWidgetItem(display)
-            item.setData(Qt.ItemDataRole.UserRole, (s, page))
+            if kind == "paragraph":
+                # Both words in this paragraph, but not in one sentence
+                item = QListWidgetItem("¶ " + display)
+                item.setForeground(QColor("#9cdcfe"))
+                item.setToolTip("Both words in one paragraph, in different sentences")
+            else:
+                item = QListWidgetItem(display)
+            # Double-click scrolls to the (first) sentence of the hit
+            item.setData(Qt.ItemDataRole.UserRole, (s.split(" … ")[0], page))
             self._sent_list.addItem(item)
 
     def _on_sentence_double_clicked(self, item: QListWidgetItem):

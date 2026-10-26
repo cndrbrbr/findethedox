@@ -140,6 +140,54 @@ Sentence co-occurrences are weighted 30 % higher because a shared sentence
 is a stronger signal than a shared paragraph. If the word exists in more than
 one category, results from all categories are combined.
 
+### Searching for two words together
+
+Type two words separated by a space (e.g. `auftrag iban`) and press
+**Enter**. The document list then shows every document in which **both words
+occur in the same sentence or the same paragraph**, with the number of hits:
+
+    Anlage ES 17.pdf  (p.1)
+        45 in sentence · 0 in paragraph
+
+- *in sentence* — both words in one sentence
+- *in paragraph* — both words in one paragraph, but in different sentences
+  (pairs already counted as sentence hits are not counted again)
+
+Documents with the most sentence hits come first; the page shown is the
+first hit. The clouds show the words related to **both** search words
+(their scores added); if there are none, the words related to either.
+
+Clicking a document lists the matching text in the sentence panel: sentences
+containing both words, and — marked with **¶** — paragraphs in which the
+words appear in different sentences (only those sentences are shown,
+joined with `…`). Double-click scrolls the viewer to that place; PDF pages
+highlight both words.
+
+Notes:
+- The hits come from allmydox's sentence and paragraph tables, so they
+  follow allmydox's sentence/paragraph split. allmydox stores verbs only per
+  sentence, so a verb gives sentence hits only, and two verbs give none.
+- More than two words are not supported; the same word twice counts once.
+
+### Searching for numbers and codes
+
+Databases indexed with **allmydox v1.8 or later** also contain numbers and
+codes — file numbers, order numbers, dates, times, error codes, IP
+addresses, version numbers, amounts (e.g. `0600997`, `M393`, `ERR-0042`,
+`2024-08-23`, `192.168.0.1`). Search for them like any word, alone or as one
+of two words (`auftrag 0600997`). A fourth cloud, **Codes**, shows the codes
+related to the search word; it only appears when a database with codes is
+open. Each cloud shows its own top words, so frequent numbers do not push out
+names or nouns.
+
+Older databases contain no codes; index the documents again with allmydox
+v1.8 into a new database to make them searchable by code. If a database has
+codes but its cache was built before this version, the Settings dialog shows
+**↻** and the cache is rebuilt on the next start (or via **Build Caches**).
+
+Values containing spaces (e.g. an IBAN in groups) are stored as several
+codes; search for two of the groups together instead.
+
 ### Left-click — follow a word
 
 Left-clicking any word in any cloud makes that word the new search term. All

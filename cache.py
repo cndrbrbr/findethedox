@@ -96,13 +96,41 @@ def status(cache_path: str, db_path: str) -> str:
         ).fetchone()[0]
         # Old combined cache holding several databases → needs its own rebuild
         last = _watermark(cc, db_path) if n_src <= 1 else None
+        cache_codes = cc.execute("SELECT 1 FROM meta WHERE key='codes'").fetchone()
         cc.close()
         if last is None:
             return "missing"
         cur = _source_max(db_path)
+        if not cache_codes and db_has_codes(db_path):
+            return "rebuild"
     except Exception:
         return "missing"
     return "outdated" if cur > last else "current"
+
+
+def db_has_codes(db_path: str) -> bool:
+    """True if the source DB was indexed by an allmydox version that stores codes."""
+    try:
+        sc = sqlite3.connect(f"{Path(db_path).absolute().as_uri()}?mode=ro", uri=True)
+        ok = sc.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='code_occurrences'"
+        ).fetchone() and sc.execute("SELECT 1 FROM code_occurrences LIMIT 1").fetchone()
+        sc.close()
+        return bool(ok)
+    except Exception:
+        return False
+
+
+def _src_has_codes(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM src.sqlite_master WHERE type='table' AND name='code_occurrences'"
+    ).fetchone() is not None
+
+
+def has_codes(conns: list[sqlite3.Connection]) -> bool:
+    """True if any cache contains codes (shows the Codes cloud)."""
+    return any(c.execute(
+        "SELECT 1 FROM word_freq WHERE kind='code' LIMIT 1").fetchone() for c in conns)
 
 
 def needs_update(cache_path: str, db_path: str) -> bool:
@@ -146,14 +174,17 @@ def build(db_paths, cache_path: str, progress: ProgressFn | None = None):
         );
     """)
 
-    steps = _build_steps(freq_table="freq_raw")
-    total = len(paths) * len(steps) + 1   # +1 for consolidation
+    total = len(paths) * len(_build_steps(codes=True)) + 1   # +1 for consolidation
     source_maxes: dict[str, int] = {}
+    any_codes = False
     offset = 0
 
     for db_path in paths:
         name = Path(db_path).name
         conn.execute(f"ATTACH DATABASE '{db_path.replace(chr(39), chr(39)*2)}' AS src")
+        codes = _src_has_codes(conn)
+        any_codes |= codes
+        steps = _build_steps(freq_table="freq_raw", codes=codes)
         for i, (label, sql) in enumerate(steps):
             if progress:
                 lbl = f"[{name}] {label}" if len(paths) > 1 else label
@@ -197,6 +228,8 @@ def build(db_paths, cache_path: str, progress: ProgressFn | None = None):
     if len(source_maxes) == 1:
         conn.execute("INSERT INTO meta VALUES ('max_file_id', ?)",
                      (str(next(iter(source_maxes.values()))),))
+    if any_codes:
+        conn.execute("INSERT INTO meta VALUES ('codes', '1')")
     conn.executemany("INSERT OR REPLACE INTO meta VALUES (?, ?)", kept_docs)
     conn.commit()
     conn.close()
@@ -238,7 +271,7 @@ def update(db_paths, cache_path: str, progress: ProgressFn | None = None):
             progress("Already up to date", 1, 1)
         return
 
-    n_steps = len(_build_steps())
+    n_steps = len(_build_steps(codes=True))
     total = len(sources_to_update) * (n_steps + 1)
     offset = 0
 
@@ -260,7 +293,8 @@ def update(db_paths, cache_path: str, progress: ProgressFn | None = None):
 
         delta_steps = _build_steps(min_file_id=last_file_id,
                                    raw_table="raw_delta",
-                                   freq_table="freq_delta")
+                                   freq_table="freq_delta",
+                                   codes=_src_has_codes(conn))
         for i, (label, sql) in enumerate(delta_steps):
             if progress:
                 lbl = f"[{name}] {label}" if len(sources_to_update) > 1 else label
@@ -392,27 +426,63 @@ def _merge(results, key_cols: tuple[str, str], val_col: str, limit: int) -> list
             for (w, kind), v in merged]
 
 
+# Words per kind (name, noun, verb, code), so frequent numbers cannot crowd
+# out the other clouds
+_COOC_PER_KIND = 80
+_FREQ_PER_KIND = 150
+
+
+def _top_per_kind(rows: list[dict], kind_col: str, val_col: str, n: int) -> list[dict]:
+    out: list[dict] = []
+    counts: dict[str, int] = {}
+    for r in sorted(rows, key=lambda r: r[val_col], reverse=True):
+        k = r[kind_col]
+        if counts.get(k, 0) < n:
+            counts[k] = counts.get(k, 0) + 1
+            out.append(r)
+    return out
+
+
 def cooccurrences(conns: list[sqlite3.Connection], word: str) -> list[dict]:
     """Return dicts (tgt_word, tgt_kind, score) ordered by score desc,
-    summed over all caches."""
-    return _merge((c.execute("""
-        SELECT tgt_word, tgt_kind, SUM(score) AS score
-        FROM cooccurrence
-        WHERE lower(src_word) = ?
-        GROUP BY tgt_word, tgt_kind
-        ORDER BY score DESC
-        LIMIT 200
-    """, (word.lower(),)).fetchall() for c in conns),
-        ("tgt_word", "tgt_kind"), "score", 200)
+    summed over all caches, at most _COOC_PER_KIND per kind."""
+    merged = _merge((c.execute("""
+        SELECT tgt_word, tgt_kind, score FROM (
+            SELECT tgt_word, tgt_kind, SUM(score) AS score,
+                   ROW_NUMBER() OVER (PARTITION BY tgt_kind
+                                      ORDER BY SUM(score) DESC) AS rn
+            FROM cooccurrence
+            WHERE lower(src_word) = ?
+            GROUP BY tgt_word, tgt_kind)
+        WHERE rn <= ?
+    """, (word.lower(), _COOC_PER_KIND)).fetchall() for c in conns),
+        ("tgt_word", "tgt_kind"), "score", 10**9)
+    return _top_per_kind(merged, "tgt_kind", "score", _COOC_PER_KIND)
+
+
+def pair_cooccurrences(conns: list[sqlite3.Connection], word1: str, word2: str) -> list[dict]:
+    """Words related to both search words (scores added); if no word is
+    related to both, the words related to either.  The search words
+    themselves are left out."""
+    r1 = {(r["tgt_word"], r["tgt_kind"]): r["score"] for r in cooccurrences(conns, word1)}
+    r2 = {(r["tgt_word"], r["tgt_kind"]): r["score"] for r in cooccurrences(conns, word2)}
+    keys = (r1.keys() & r2.keys()) or (r1.keys() | r2.keys())
+    skip = {word1.lower(), word2.lower()}
+    rows = [{"tgt_word": w, "tgt_kind": k, "score": r1.get((w, k), 0) + r2.get((w, k), 0)}
+            for w, k in keys if w.lower() not in skip]
+    return _top_per_kind(rows, "tgt_kind", "score", _COOC_PER_KIND)
 
 
 def global_frequencies(conns: list[sqlite3.Connection]) -> list[dict]:
-    """Return dicts (word, kind, freq) for the most frequent words across caches."""
-    return _merge((c.execute("""
-        SELECT word, kind, freq FROM word_freq
-        ORDER BY freq DESC LIMIT 450
-    """).fetchall() for c in conns),
-        ("word", "kind"), "freq", 450)
+    """Return dicts (word, kind, freq) for the most frequent words across
+    caches, at most _FREQ_PER_KIND per kind."""
+    # One indexed query per kind (idx_wf on kind, freq DESC)
+    merged = _merge((c.execute(" UNION ALL ".join(
+        f"SELECT * FROM (SELECT word, kind, freq FROM word_freq "
+        f"WHERE kind='{k}' ORDER BY freq DESC LIMIT {_FREQ_PER_KIND})"
+        for k in ("name", "noun", "verb", "code"))).fetchall() for c in conns),
+        ("word", "kind"), "freq", 10**9)
+    return _top_per_kind(merged, "kind", "freq", _FREQ_PER_KIND)
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +497,7 @@ def _build_steps(
     min_file_id: int = 0,
     raw_table: str = "raw",
     freq_table: str = "word_freq",
+    codes: bool = False,
 ) -> list[tuple[str, str]]:
     """
     Return (label, sql) pairs for each aggregation step.
@@ -566,4 +637,41 @@ def _build_steps(
             FROM {occ_tbl} o JOIN {vocab_tbl} w USING({id_col}){w_f}
             GROUP BY o.{id_col}""")
 
+    if codes:
+        _code_steps(cooc, freq, fi)
+
     return steps
+
+
+def _code_steps(cooc, freq, fi: int):
+    """Steps for allmydox code tables: code_sentence / code_paragraph link a
+    code occurrence with a noun, name or code occurrence."""
+    occ = {
+        "noun": ("src.noun_occurrences", "nounOccurrenceID", "src.nouns", "nounID", "noun"),
+        "name": ("src.name_occurrences", "nameOccurrenceID", "src.names", "nameID", "name"),
+        "code": ("src.code_occurrences", "codeOccurrenceID", "src.codes", "codeID", "code"),
+    }
+    for tbl, w, pfx in [
+        ("src.code_sentence",  _S, "Sentence"),
+        ("src.code_paragraph", _P, "Paragraph"),
+    ]:
+        for otype, (o_tbl, o_pk, v_tbl, v_id, v_col) in occ.items():
+            where = f"\n            WHERE co.fileID>{fi} OR oo.fileID>{fi}" if fi else ""
+            body = f"""
+            FROM {tbl} c
+            JOIN src.code_occurrences co ON c.code_occ_id=co.codeOccurrenceID
+            JOIN src.codes cd ON co.codeID=cd.codeID
+            JOIN {o_tbl} oo ON c.occ_type='{otype}' AND c.occ_id=oo.{o_pk}
+            JOIN {v_tbl} ov ON oo.{v_id}=ov.{v_id}{where}"""
+            cooc(f"{pfx}: code→{otype}", f"""
+            SELECT cd.code,'code',ov.{v_col},'{otype}',COUNT(*)*{w}{body}
+            GROUP BY co.codeID,oo.{v_id}""")
+            cooc(f"{pfx}: {otype}→code", f"""
+            SELECT ov.{v_col},'{otype}',cd.code,'code',COUNT(*)*{w}{body}
+            GROUP BY oo.{v_id},co.codeID""")
+
+    w_f = f"\n            WHERE o.fileID>{fi}" if fi else ""
+    freq("Frequencies: codes", f"""
+            SELECT w.code,'code',COUNT(*)
+            FROM src.code_occurrences o JOIN src.codes w USING(codeID){w_f}
+            GROUP BY o.codeID""")

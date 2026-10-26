@@ -17,6 +17,19 @@ or paragraph, scored as:
 Sentence co-occurrences are weighted 30 % higher because sharing a sentence is
 a stronger semantic signal than sharing a paragraph.
 
+### Two-word search
+Two words separated by a space list every document in which both occur in
+one sentence or one paragraph, with separate sentence and paragraph hit
+counts, sorted by sentence hits. The clouds show words related to both
+search words. The sentence panel shows the matching sentences and, marked
+with ¶, the paragraphs in which the words appear in different sentences.
+
+### Numbers and codes
+With databases from allmydox v1.8+, numbers and codes (IDs, dates, error
+codes, IP addresses, amounts) are searchable alone and in two-word search,
+and a fourth **Codes** cloud appears. Caches built before codes existed are
+marked ↻ and rebuilt.
+
 ### Three word-kind clouds
 Results are split into three independent clouds:
 

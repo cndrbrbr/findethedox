@@ -209,6 +209,41 @@ _SearchWorker:
      → docs_ready → populate document list
 ```
 
+### Two-word search
+```
+_SearchWorker (search text has two words):
+  1. cache.pair_cooccurrences(conns, w1, w2)
+     words related to both (scores added), else to either
+     → cooc_ready → update clouds
+
+  2. for each source db: query.pair_occurrences(conn, w1, w2)
+       noun_sentence  + noun_verb_sentence  → sentence pairs
+       noun_paragraph − sentence pairs      → paragraph pairs
+     grouped per document, sorted by sentence hits
+     → docs_ready → document list with hit counts
+```
+The pair tables store `(occ1, occ2)` in text order, so both directions are
+queried. Each query starts from w1's occurrences (materialized CTE), follows
+the `occ1`/`occ2` index into the pair table, and checks w2's occurrences via
+an automatic index (`CROSS JOIN` fixes this order). On a database with
+5.2 M sentence pairs a pair takes 0.1–0.4 s.
+
+### Codes (allmydox v1.8+)
+Source DBs may contain `codes`, `code_occurrences`, `code_sentence` and
+`code_paragraph` (`query.has_codes()`). Then:
+- the cache gets `code` rows in `word_freq` and `cooccurrence`
+  (`cache._code_steps()`, same weights as nouns) and meta `codes = 1`;
+  `cache.status()` returns `rebuild` for a DB with codes whose cache lacks it
+- `document_occurrences()` also searches `code_occurrences`
+- `pair_occurrences()` adds `code_sentence` / `code_paragraph` pairs
+  (`_code_pairs()`, both join directions because the code can be either word)
+- clouds and the global view are limited per kind (80 / 150 words), so
+  frequent codes do not crowd out names and nouns
+
+`doc_viewer.contexts_containing()` produces the sentence panel for a pair:
+text is split into paragraphs at blank lines (as allmydox does), then into
+sentences.
+
 ### Sentence extraction
 ```
 _SentenceWorker:

@@ -7,7 +7,7 @@ from pathlib import Path, PureWindowsPath
 @dataclass
 class WordScore:
     word: str
-    kind: str   # 'noun', 'name', or 'verb'
+    kind: str   # 'noun', 'name', 'verb' or 'code'
     score: float
 
 
@@ -18,6 +18,10 @@ class DocOccurrence:
     pagenumber: int
     position: int
     source_db: str = ""
+    # Two-word search: pairs of the words in one sentence / one paragraph
+    # (paragraph hits exclude pairs already counted as sentence hits)
+    sentence_hits: int = 0
+    paragraph_hits: int = 0
 
 
 def connect(db_path: str) -> sqlite3.Connection:
@@ -224,7 +228,14 @@ def document_occurrences(conn: sqlite3.Connection, word: str) -> list[DocOccurre
            JOIN documents d USING(fileID)
            WHERE lower(v.verb)=?
            ORDER BY d.filename, o.pagenumber""",
-    ]:
+    ] + ([
+        """SELECT d.filename, d.folderpath, o.pagenumber, o.position
+           FROM code_occurrences o
+           JOIN codes c USING(codeID)
+           JOIN documents d USING(fileID)
+           WHERE lower(c.code)=?
+           ORDER BY d.filename, o.pagenumber""",
+    ] if has_codes(conn) else []):
         for r in conn.execute(sql, (s,)).fetchall():
             results.append(DocOccurrence(r[0], r[1], r[2], r[3]))
 
@@ -237,6 +248,149 @@ def document_occurrences(conn: sqlite3.Connection, word: str) -> list[DocOccurre
             seen.add(key)
             unique.append(d)
     return unique
+
+
+# ---------------------------------------------------------------------------
+# Two-word search (document panel)
+# ---------------------------------------------------------------------------
+
+def has_codes(conn: sqlite3.Connection) -> bool:
+    """True if the DB comes from an allmydox version that stores codes."""
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='code_occurrences'"
+    ).fetchone() is not None
+
+
+_CODE_OCCS = """
+    UNION ALL
+    SELECT 'code', codeOccurrenceID, fileID, pagenumber, position
+      FROM code_occurrences
+     WHERE codeID IN (SELECT codeID FROM codes WHERE lower(code) = :{w})"""
+
+# Noun/name occurrences of :w as (t, id, f, p, pos); codes are appended
+# with _CODE_OCCS when the DB has them
+_ENTITY_OCCS = """
+    SELECT 'noun', nounOccurrenceID, fileID, pagenumber, position
+      FROM noun_occurrences
+     WHERE nounID IN (SELECT nounID FROM nouns WHERE lower(noun) = :{w})
+    UNION ALL
+    SELECT 'name', nameOccurrenceID, fileID, pagenumber, position
+      FROM name_occurrences
+     WHERE nameID IN (SELECT nameID FROM names WHERE lower(name) = :{w})"""
+
+_VERB_OCCS = """
+    SELECT verbOccurrenceID FROM verb_occurrences
+     WHERE verbID IN (SELECT verbID FROM verbs WHERE lower(verb) = :{w})"""
+
+
+def _occs(w: str, codes: bool) -> str:
+    return _ENTITY_OCCS.format(w=w) + (_CODE_OCCS.format(w=w) if codes else "")
+
+
+def _entity_pairs(conn, table: str, w1: str, w2: str) -> list[tuple]:
+    """(fileID, page, pos, pair_key) for every row of a noun/name pair table
+    (noun_sentence or noun_paragraph) linking w1 and w2, in either order.
+    CROSS JOIN fixes the join order: w1's occurrences → pair table via the
+    occ1/occ2 index → w2's occurrences (materialized once, auto-indexed)."""
+    rows = []
+    for here, there in (("occ1", "occ2"), ("occ2", "occ1")):
+        rows += conn.execute(f"""
+            WITH a(t, id, f, p, pos) AS MATERIALIZED ({_occs("w1", False)}),
+                 b(t, id, f, p, pos) AS MATERIALIZED ({_occs("w2", False)})
+            SELECT a.f, a.p, a.pos, c.occ1_type, c.occ1_id, c.occ2_type, c.occ2_id
+              FROM a CROSS JOIN {table} c CROSS JOIN b
+                ON c.{here}_type = a.t AND c.{here}_id = a.id
+               AND b.t = c.{there}_type AND b.id = c.{there}_id
+        """, {"w1": w1, "w2": w2}).fetchall()
+    return [(f, p, pos, frozenset([(t1, i1), (t2, i2)]))
+            for f, p, pos, t1, i1, t2, i2 in rows]
+
+
+def _verb_pairs(conn, w_entity: str, w_verb: str) -> list[tuple]:
+    """(fileID, page, pos, pair_key) for noun/name w_entity and verb w_verb
+    in one sentence (allmydox stores verbs only at sentence level)."""
+    rows = conn.execute(f"""
+        WITH a(t, id, f, p, pos) AS MATERIALIZED ({_occs("we", False)}),
+             v(id)               AS MATERIALIZED ({_VERB_OCCS.format(w="wv")})
+        SELECT a.f, a.p, a.pos, a.t, a.id, nvs.verb_occ_id
+          FROM a CROSS JOIN noun_verb_sentence nvs CROSS JOIN v
+            ON nvs.noun_occ_type = a.t AND nvs.noun_occ_id = a.id
+           AND v.id = nvs.verb_occ_id
+    """, {"we": w_entity, "wv": w_verb}).fetchall()
+    return [(f, p, pos, frozenset([(t, i), ("verb", v)]))
+            for f, p, pos, t, i, v in rows]
+
+
+def _code_pairs(conn, table: str, w1: str, w2: str) -> list[tuple]:
+    """(fileID, page, pos, pair_key) for rows of code_sentence / code_paragraph
+    linking w1 and w2.  Each row is (code_occ_id, occ_type, occ_id); the code
+    side can be either word, so both join directions are queried."""
+    occs = f"""a(t, id, f, p, pos) AS MATERIALIZED ({_occs("w1", True)}),
+               b(t, id, f, p, pos) AS MATERIALIZED ({_occs("w2", True)})"""
+    rows = conn.execute(f"""
+        WITH {occs}
+        SELECT a.f, a.p, a.pos, c.code_occ_id, c.occ_type, c.occ_id
+          FROM a CROSS JOIN {table} c CROSS JOIN b
+            ON a.t = 'code' AND c.code_occ_id = a.id
+           AND b.t = c.occ_type AND b.id = c.occ_id
+    """, {"w1": w1, "w2": w2}).fetchall()
+    rows += conn.execute(f"""
+        WITH {occs}
+        SELECT a.f, a.p, a.pos, c.code_occ_id, c.occ_type, c.occ_id
+          FROM a CROSS JOIN {table} c CROSS JOIN b
+            ON c.occ_type = a.t AND c.occ_id = a.id
+           AND b.t = 'code' AND b.id = c.code_occ_id
+    """, {"w1": w1, "w2": w2}).fetchall()
+    return [(f, p, pos, frozenset([("code", ci), (ot, oi)]))
+            for f, p, pos, ci, ot, oi in rows]
+
+
+def pair_occurrences(conn: sqlite3.Connection, word1: str, word2: str) -> list[DocOccurrence]:
+    """Documents in which word1 and word2 occur together in one sentence or
+    one paragraph, one entry per document, most sentence hits first.
+
+    pagenumber/position point at the first hit.  Sentence pairs come from
+    noun_sentence and noun_verb_sentence, paragraph pairs from noun_paragraph
+    (which also contains same-sentence pairs, so those are subtracted).
+    Codes (numbers, IDs) use code_sentence / code_paragraph when present.
+    Two verbs cannot be matched: allmydox stores no verb–verb pairs."""
+    w1, w2 = word1.lower(), word2.lower()
+
+    sent = _entity_pairs(conn, "noun_sentence", w1, w2)
+    sent += _verb_pairs(conn, w1, w2) + _verb_pairs(conn, w2, w1)
+    para = _entity_pairs(conn, "noun_paragraph", w1, w2)
+    if has_codes(conn):
+        sent += _code_pairs(conn, "code_sentence", w1, w2)
+        para += _code_pairs(conn, "code_paragraph", w1, w2)
+
+    sent_keys = {k for *_, k in sent}
+    # file → [sentence pairs, paragraph-only pairs, (page, pos) of first hit]
+    per_file: dict[int, list] = {}
+    for rows, idx in ((sent, 0), (para, 1)):
+        for f, p, pos, key in rows:
+            if idx == 1 and key in sent_keys:
+                continue
+            entry = per_file.setdefault(f, [set(), set(), (p, pos)])
+            entry[idx].add(key)
+            entry[2] = min(entry[2], (p, pos))
+
+    if not per_file:
+        return []
+    ids = list(per_file)
+    docs = {}
+    for i in range(0, len(ids), 500):   # stay below SQLite's variable limit
+        chunk = ids[i:i + 500]
+        docs.update({r[0]: (r[1], r[2]) for r in conn.execute(
+            f"SELECT fileID, filename, folderpath FROM documents "
+            f"WHERE fileID IN ({','.join('?' * len(chunk))})", chunk)})
+
+    results = [
+        DocOccurrence(docs[f][0], docs[f][1], first[0], first[1],
+                      sentence_hits=len(s_keys), paragraph_hits=len(p_keys))
+        for f, (s_keys, p_keys, first) in per_file.items() if f in docs
+    ]
+    results.sort(key=lambda d: (-d.sentence_hits, -d.paragraph_hits, d.filename))
+    return results
 
 
 # ---------------------------------------------------------------------------

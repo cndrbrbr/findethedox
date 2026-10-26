@@ -21,8 +21,9 @@ _COLOURS = {
     "name": "#2E86AB",
     "noun": "#A23B72",
     "verb": "#F18F01",
+    "code": "#4EC9B0",
 }
-_TITLE = {"name": "Names", "noun": "Nouns", "verb": "Verbs"}
+_TITLE = {"name": "Names", "noun": "Nouns", "verb": "Verbs", "code": "Codes"}
 
 
 def _system_font() -> str:
