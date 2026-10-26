@@ -95,7 +95,8 @@ class _PdfViewer(QWidget):
         painter.setPen(pen)
         painter.setBrush(QColor(255, 220, 0, 60))
         scale = 1.8
-        for rect in page.search_for(self._word):
+        rects = [r for w in (self._word.split() or [self._word]) for r in page.search_for(w)]
+        for rect in rects:
             r = QRectF(
                 rect.x0 * scale, rect.y0 * scale,
                 (rect.x1 - rect.x0) * scale, (rect.y1 - rect.y0) * scale,
@@ -147,7 +148,7 @@ class _TextViewer(QWidget):
         target = sentence[:80] if sentence else word
         cursor = editor.document().find(target)
         if cursor.isNull() and sentence:
-            cursor = editor.document().find(word)
+            cursor = editor.document().find(word.split()[0] if word.split() else word)
         if not cursor.isNull():
             editor.setTextCursor(cursor)
             editor.ensureCursorVisible()
@@ -190,4 +191,53 @@ def sentences_containing(filepath: str, word: str) -> list[tuple[str, int]]:
     except Exception:
         return []
 
+    return results
+
+
+def contexts_containing(filepath: str, words: list[str]) -> list[tuple[str, int, str]]:
+    """Return (text, page_number, kind) for two search words.
+
+    kind 'sentence': a sentence that contains both words.
+    kind 'paragraph': a paragraph in which the words occur in different
+    sentences; text is those sentences joined with ' … '.
+
+    Paragraphs are split at blank lines, as allmydox does when it fills
+    noun_paragraph.  page_number is 1-based for PDFs, 0 otherwise.
+    """
+    w1, w2 = (w.lower() for w in words[:2])
+    ext = Path(filepath).suffix.lower()
+    results: list[tuple[str, int, str]] = []
+
+    def scan(text: str, page: int):
+        for para in re.split(r'\n\s*\n', text):
+            para = re.sub(r'\s+', ' ', para).strip()
+            low = para.lower()
+            if not para or w1 not in low or w2 not in low:
+                continue
+            sents = [x.strip() for x in re.split(r'(?<=[.!?])\s+', para) if x.strip()]
+            has1 = [w1 in x.lower() for x in sents]
+            has2 = [w2 in x.lower() for x in sents]
+            for x, a, b in zip(sents, has1, has2):
+                if a and b:
+                    results.append((x, page, "sentence"))
+            # Words in two different sentences of this paragraph
+            if any(a and b2 for i, a in enumerate(has1)
+                   for j, b2 in enumerate(has2) if i != j):
+                excerpt = " … ".join(x for x, a, b in zip(sents, has1, has2) if a or b)
+                results.append((excerpt, page, "paragraph"))
+
+    try:
+        if ext == ".pdf":
+            import fitz
+            doc = fitz.open(filepath)
+            for page_idx, page in enumerate(doc):
+                scan(page.get_text("text"), page_idx + 1)
+            doc.close()
+        elif ext == ".docx":
+            from docx import Document
+            scan("\n".join(p.text for p in Document(filepath).paragraphs), 0)
+        else:
+            scan(Path(filepath).read_text(encoding="utf-8", errors="replace"), 0)
+    except Exception:
+        return []
     return results

@@ -641,6 +641,76 @@ confusing.
 
 ---
 
+## v2.12 — 2026-10-25  Search numbers and codes
+
+Requires databases indexed with allmydox v1.8, which stores numbers and codes
+(`0600997`, `M393`, `ERR-0042`, `2024-08-23`, `192.168.0.1`, …) in new tables
+`codes`, `code_occurrences`, `code_sentence`, `code_paragraph`. Older
+databases keep working unchanged.
+
+- **Search**: codes are found like words — document list, two-word search
+  (sentence and paragraph hits), sentence panel.
+- **Codes cloud**: a fourth cloud, shown only when a cache contains codes.
+- **Per-kind limits**: clouds show up to 80 related words per kind and the
+  global view up to 150 per kind (before: top 200 / 450 over all kinds), so
+  frequent numbers cannot push out names, nouns or verbs.
+- **Cache**: code co-occurrences and frequencies are added; meta `codes = 1`.
+  A DB with codes whose cache predates them gets status **↻ rebuild** and is
+  rebuilt at startup.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `query.py` | `has_codes()`; codes in `document_occurrences()` and `pair_occurrences()` (`_code_pairs()`) |
+| `cache.py` | `_code_steps()`; `db_has_codes()`, `has_codes()`; status `rebuild`; per-kind limits in `cooccurrences()` / `global_frequencies()` |
+| `cloud_widget.py` | `code` kind (title *Codes*, colour) |
+| `app.py` | Codes cloud (hidden without codes); ↻ status; rebuild at startup |
+| `README.md`, `features.md`, `architecture.md` | Document code search |
+
+---
+
+## v2.11 — 2026-10-25  Two-word search: both words in one sentence or paragraph
+
+### Feature
+
+When two words are searched, the document list shows the documents in which
+both words occur in the same sentence or the same paragraph, with separate
+hit counts ("45 in sentence · 3 in paragraph"), sorted by sentence hits.
+Paragraph hits are pairs in one paragraph but in different sentences.
+
+- **Clouds** show words related to both search words (scores added); if
+  there are none, words related to either.
+- **Sentence panel** lists sentences containing both words and, marked
+  with ¶, paragraphs where they occur in different sentences (only those
+  sentences, joined with "…").
+- **PDF viewer** highlights both words.
+- More than two words → status message; the same word twice counts once.
+
+### How hits are found
+
+From the allmydox tables: `noun_sentence` and `noun_verb_sentence` give
+sentence pairs, `noun_paragraph` gives paragraph pairs (it also contains
+same-sentence pairs, which are subtracted). Verbs exist only at sentence
+level, so verb + verb has no hits.
+
+The first query version used a correlated `IN` subquery that SQLite
+re-evaluated per row (75–195 s, and too few hits). It now uses
+materialized CTEs with a fixed `CROSS JOIN` order: 0.1–0.4 s on
+`sv_bibliothek`. Results were checked against a brute-force count.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `query.py` | `pair_occurrences()`; `DocOccurrence` gains `sentence_hits`, `paragraph_hits` |
+| `cache.py` | `pair_cooccurrences()` |
+| `doc_viewer.py` | `contexts_containing()`; PDF highlight of several words |
+| `app.py` | `search_words()`; `_SearchWorker` / `_SentenceWorker` pair mode; hit counts in document list; ¶ paragraph items; status texts |
+| `README.md`, `features.md`, `architecture.md` | Document two-word search |
+
+---
+
 ## v2.10 — 2026-10-25  Drive letter per database; Close button
 
 ### Drive letter per database
